@@ -1,37 +1,125 @@
-use crate::provider::{
-    Provider,
-    llama_cpp::{LlamaCPP, LlamaCPPConfig, LlamaCPPModel},
+use crate::{
+    agent::Agent,
+    config::Config,
+    model::{Model, ModelId},
+    provider::{Provider, registry::ProviderRegistry},
+    session::Session,
 };
-use anyhow::Result;
-use std::path::Path;
+use anyhow::{Context, Result, bail, ensure};
+use std::{
+    collections::{HashMap, hash_map::Entry},
+    sync::Arc,
+};
 
-/// Owns the provider that loads models and runs prompts for agents.
-pub struct Harness<P = LlamaCPP> {
-    provider: P,
+/// Owns the sessions and providers that agents use for inference.
+pub struct Harness {
+    sessions: HashMap<String, Session>,
+    providers: HashMap<String, Arc<dyn Provider>>,
 }
 
-impl Harness<LlamaCPP> {
-    /// Create a harness with a llama.cpp provider.
-    pub fn new(config: LlamaCPPConfig) -> Result<Self> {
-        Ok(Self::with_provider(LlamaCPP::new(config)?))
+impl Harness {
+    pub fn new(config: &Config) -> Result<Self> {
+        Self::with_registry(config, &ProviderRegistry::discover()?)
     }
 
-    pub fn load_model(&self, path: impl AsRef<Path>, gpu_layers: u32) -> Result<LlamaCPPModel<'_>> {
-        self.provider.load_model(path, gpu_layers)
+    pub fn with_registry(config: &Config, registry: &ProviderRegistry) -> Result<Self> {
+        for id in config.provider_ids() {
+            ensure!(registry.contains(id), "unknown configured provider '{id}'");
+        }
+        let mut harness = Self {
+            sessions: HashMap::new(),
+            providers: HashMap::new(),
+        };
+        for (id, create) in registry.list() {
+            harness
+                .register_provider(id, || create(config))
+                .with_context(|| format!("failed to initialize provider '{id}'"))?;
+        }
+        Ok(harness)
     }
-}
 
-impl<P: Provider> Harness<P> {
-    /// Give the harness ownership of a provider supplied by the caller.
-    pub fn with_provider(provider: P) -> Self {
-        Self { provider }
+    /// Create a provider and register it under a unique identifier.
+    pub fn register_provider(
+        &mut self,
+        provider_id: &str,
+        create: impl FnOnce() -> Result<Arc<dyn Provider>>,
+    ) -> Result<()> {
+        ensure!(
+            !provider_id.trim().is_empty(),
+            "provider identifier cannot be empty"
+        );
+        match self.providers.entry(provider_id.to_owned()) {
+            Entry::Vacant(entry) => {
+                entry.insert(create()?);
+                Ok(())
+            }
+            Entry::Occupied(_) => bail!("provider '{provider_id}' is already registered"),
+        }
     }
 
-    pub fn send<'harness>(
-        &'harness self,
-        model: &P::Model<'harness>,
-        prompt: &str,
-    ) -> Result<String> {
-        self.provider.send(model, prompt)
+    fn provider_handle(&self, provider_id: &str) -> Result<&Arc<dyn Provider>> {
+        self.providers
+            .get(provider_id)
+            .with_context(|| format!("unknown provider '{provider_id}'"))
+    }
+
+    pub fn provider(&self, provider_id: &str) -> Result<&dyn Provider> {
+        Ok(self.provider_handle(provider_id)?.as_ref())
+    }
+
+    /// Get a shared reference to a model owned by a registered provider.
+    pub fn model(&self, model: ModelId<'_>) -> Result<Arc<dyn Model>> {
+        self.provider(model.provider)?.model(model.model)
+    }
+
+    /// Create a session with at least one named agent and bind each agent to a model.
+    pub fn create_session(
+        &mut self,
+        session_id: &str,
+        agents: &[(&str, ModelId<'_>)],
+    ) -> Result<()> {
+        ensure!(
+            !session_id.trim().is_empty(),
+            "session identifier cannot be empty"
+        );
+        ensure!(
+            !self.sessions.contains_key(session_id),
+            "session '{session_id}' is already registered"
+        );
+        let session = Session::new(agents, |model| {
+            let provider = self.provider_handle(model.provider)?;
+            Ok(Agent::new(
+                Arc::clone(provider),
+                provider.model(model.model)?,
+            ))
+        })?;
+        self.sessions.insert(session_id.to_owned(), session);
+        Ok(())
+    }
+
+    pub fn session(&self, session_id: &str) -> Result<&Session> {
+        self.sessions
+            .get(session_id)
+            .with_context(|| format!("unknown session '{session_id}'"))
+    }
+
+    pub fn agent(&self, session_id: &str, agent_id: &str) -> Result<&Agent> {
+        self.session(session_id)?.agent(agent_id)
+    }
+
+    /// Drop a session and its agents. The harness continues to own its providers.
+    pub fn close_session(&mut self, session_id: &str) -> Result<()> {
+        self.sessions
+            .remove(session_id)
+            .with_context(|| format!("unknown session '{session_id}'"))?;
+        Ok(())
+    }
+
+    pub async fn send(&self, model: ModelId<'_>, prompt: &str) -> Result<String> {
+        self.provider(model.provider)?
+            .send(model.model, prompt)
+            .await?
+            .into_text()
+            .await
     }
 }

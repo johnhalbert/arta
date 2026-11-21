@@ -1,0 +1,203 @@
+use crate::provider::llama_cpp::LlamaCPPOverrides;
+use anyhow::{Context, Result};
+use clap::Parser;
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use std::{
+    collections::BTreeMap,
+    fs,
+    io::ErrorKind,
+    num::NonZeroU32,
+    path::{self, Path, PathBuf},
+    sync::LazyLock,
+};
+
+static CONFIG: LazyLock<Result<StartupConfig>> = LazyLock::new(|| Args::parse().into_config());
+
+pub struct StartupConfig {
+    pub settings: Config,
+    pub prompt: String,
+}
+
+/// Return the CLI configuration, initialized once from TOML and CLI arguments.
+pub fn get() -> Result<&'static StartupConfig, &'static anyhow::Error> {
+    CONFIG.as_ref()
+}
+
+#[derive(Parser, Debug)]
+#[command(version, about = "Run a single prompt against a local GGUF model")]
+struct Args {
+    /// Path to a TOML configuration file (defaults to config.toml when present).
+    #[arg(long, value_name = "PATH")]
+    config: Option<PathBuf>,
+
+    /// Override the provider selected in the configuration.
+    #[arg(long, value_name = "ID")]
+    provider: Option<String>,
+
+    /// Override the model identifier selected in the configuration.
+    #[arg(long, value_name = "ID")]
+    model_id: Option<String>,
+
+    /// Override the selected model's GGUF file.
+    #[arg(short, long, value_name = "PATH")]
+    model: Option<PathBuf>,
+
+    /// Prompt text. Use - to read UTF-8 text from stdin.
+    #[arg(short, long, value_name = "TEXT")]
+    prompt: String,
+
+    /// Total token budget for the prompt and response (defaults to 4096 or the model's limit, whichever is lower).
+    #[arg(short, long, value_name = "TOKENS")]
+    context_length: Option<NonZeroU32>,
+
+    /// Maximum number of tokens to generate (defaults to 256).
+    #[arg(long, value_name = "TOKENS")]
+    max_tokens: Option<NonZeroU32>,
+
+    /// Number of layers to offload to the GPU (requires a CUDA build).
+    #[arg(long, value_name = "LAYERS")]
+    gpu_layers: Option<u32>,
+
+    /// Show llama.cpp diagnostics on stderr.
+    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+    verbose: Option<bool>,
+}
+
+impl Args {
+    fn into_config(self) -> Result<StartupConfig> {
+        let mut settings = Config::load(self.config.as_deref())?;
+        if let Some(provider) = self.provider {
+            settings.app.provider = provider;
+        }
+        if let Some(model) = self.model_id {
+            settings.app.model = model;
+        }
+        LlamaCPPOverrides {
+            model_path: self.model,
+            context_length: self.context_length,
+            max_tokens: self.max_tokens,
+            gpu_layers: self.gpu_layers,
+            verbose: self.verbose,
+        }
+        .apply(&mut settings)?;
+
+        Ok(StartupConfig {
+            settings,
+            prompt: self.prompt,
+        })
+    }
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Config {
+    pub app: AppConfig,
+    providers: BTreeMap<String, toml::Table>,
+    #[serde(skip)]
+    directory: PathBuf,
+}
+
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AppConfig {
+    pub provider: String,
+    pub model: String,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            provider: "llama.cpp".into(),
+            model: "local".into(),
+        }
+    }
+}
+
+impl Config {
+    /// Load the requested file, or look for `config.toml` in the working directory.
+    pub fn load(path: Option<&Path>) -> Result<Self> {
+        let required = path.is_some();
+        let path = path::absolute(path.unwrap_or_else(|| Path::new("config.toml")))?;
+        let source = match fs::read_to_string(&path) {
+            Err(error) if !required && error.kind() == ErrorKind::NotFound => {
+                return Ok(Self::default());
+            }
+            result => {
+                result.with_context(|| format!("failed to read config '{}'", path.display()))?
+            }
+        };
+        let mut config: Self = toml::from_str(&source)
+            .with_context(|| format!("invalid config '{}'", path.display()))?;
+        config.directory = path
+            .parent()
+            .context("config file has no parent directory")?
+            .to_owned();
+        Ok(config)
+    }
+
+    pub fn provider_settings<T: DeserializeOwned + Default>(&self, provider: &str) -> Result<T> {
+        self.providers
+            .get(provider)
+            .map(|settings| {
+                toml::Value::Table(settings.clone())
+                    .try_into()
+                    .with_context(|| format!("invalid config for provider '{provider}'"))
+            })
+            .unwrap_or_else(|| Ok(T::default()))
+    }
+
+    pub fn set_provider_settings(
+        &mut self,
+        provider: &str,
+        settings: impl Serialize,
+    ) -> Result<()> {
+        let settings = toml::Table::try_from(settings)
+            .with_context(|| format!("failed to update config for provider '{provider}'"))?;
+        self.providers.insert(provider.to_owned(), settings);
+        Ok(())
+    }
+
+    pub fn resolve_path(&self, path: &Path) -> PathBuf {
+        self.directory.join(path)
+    }
+
+    pub(crate) fn provider_ids(&self) -> impl Iterator<Item = &str> {
+        self.providers.keys().map(String::as_str)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::llama_cpp::{LlamaCPP, LlamaCPPConfig};
+
+    #[test]
+    fn startup_config_merges_cli_overrides_before_selecting_the_model() -> Result<()> {
+        let file = format!("{}/config.example.toml", env!("CARGO_MANIFEST_DIR"));
+        let startup = Args::try_parse_from([
+            "arta",
+            "--config",
+            &file,
+            "--prompt",
+            "Hello",
+            "--model-id",
+            "one-off",
+            "--model",
+            "replacement.gguf",
+            "--max-tokens",
+            "32",
+            "--verbose",
+        ])?
+        .into_config()?;
+
+        assert_eq!(startup.prompt, "Hello");
+        assert_eq!(startup.settings.app.model, "one-off");
+        let provider: LlamaCPPConfig = startup.settings.provider_settings(LlamaCPP::ID)?;
+        assert_eq!(provider.max_tokens.get(), 32);
+        assert!(provider.verbose);
+        assert_eq!(provider.models[0].id, "local");
+        assert_eq!(provider.models[1].id, "one-off");
+        assert_eq!(provider.models[1].path, path::absolute("replacement.gguf")?);
+        Ok(())
+    }
+}

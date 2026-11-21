@@ -2,18 +2,20 @@ use crate::model::Model;
 use anyhow::{Context, Result, ensure};
 use llama_cpp_4::{StringFromModelError, prelude::*};
 use serde_json::json;
-use std::{num::NonZeroU32, path::Path};
+use std::{num::NonZeroU32, path::Path, sync::Arc};
 
-/// A GGUF model that borrows the provider's backend for its lifetime.
-pub struct LlamaCPPModel<'provider> {
+pub(super) struct LlamaCPPModel {
+    id: Arc<str>,
     templates: Option<ChatTemplates>,
     pub(super) inner: LlamaModel,
-    backend: &'provider LlamaBackend,
+    // Keep the backend alive until after the native model drops.
+    backend: Arc<LlamaBackend>,
 }
 
-impl<'provider> LlamaCPPModel<'provider> {
+impl LlamaCPPModel {
     pub(super) fn load(
-        backend: &'provider LlamaBackend,
+        id: Arc<str>,
+        backend: Arc<LlamaBackend>,
         path: &Path,
         gpu_layers: u32,
     ) -> Result<Self> {
@@ -32,7 +34,7 @@ impl<'provider> LlamaCPPModel<'provider> {
         );
 
         let parameters = LlamaModelParams::default().with_n_gpu_layers(gpu_layers);
-        let inner = LlamaModel::load_from_file(backend, path, &parameters)
+        let inner = LlamaModel::load_from_file(&backend, path, &parameters)
             .with_context(|| format!("failed to load GGUF model '{}'", path.display()))?;
         ensure!(
             inner.has_decoder() && !inner.has_encoder() && !inner.is_diffusion(),
@@ -49,6 +51,7 @@ impl<'provider> LlamaCPPModel<'provider> {
         };
 
         Ok(Self {
+            id,
             templates,
             inner,
             backend,
@@ -70,9 +73,8 @@ impl<'provider> LlamaCPPModel<'provider> {
             let tokens = chat
                 .tokenize_prompt(&self.inner, add_bos)
                 .context("failed to tokenize chat prompt")?;
-            let mut stops: Vec<String> = serde_json::from_str(&chat.additional_stops_json)
+            let stops = serde_json::from_str(&chat.additional_stops_json)
                 .context("failed to read chat template stop strings")?;
-            stops.retain(|stop| !stop.is_empty());
             return Ok((tokens, stops));
         }
 
@@ -86,14 +88,18 @@ impl<'provider> LlamaCPPModel<'provider> {
     pub(super) fn new_context(&self, context_length: NonZeroU32) -> Result<LlamaContext<'_>> {
         self.inner
             .new_context(
-                self.backend,
+                &self.backend,
                 LlamaContextParams::default().with_n_ctx(Some(context_length)),
             )
             .context("failed to create inference context")
     }
 }
 
-impl Model for LlamaCPPModel<'_> {
+impl Model for LlamaCPPModel {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
     fn trained_context_length(&self) -> u32 {
         self.inner.n_ctx_train()
     }

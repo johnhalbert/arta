@@ -1,74 +1,97 @@
 use anyhow::{Context, Result, ensure};
-use arta::{agent::Agent, harness::Harness, provider::llama_cpp::LlamaCPPConfig};
-use clap::Parser;
-use std::{
-    io::{self, Read, Write},
-    num::NonZeroU32,
-    path::PathBuf,
-    process::ExitCode,
+use arta::{
+    config::{self, StartupConfig},
+    harness::Harness,
+    model::ModelId,
+    stream::{Frame, Message},
+};
+use futures_util::{StreamExt, stream};
+use std::process::ExitCode;
+use tokio::{
+    io::{self, AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader},
+    task::spawn_blocking,
 };
 
-#[derive(Parser, Debug)]
-#[command(version, about = "Run a single prompt against a local GGUF model")]
-struct Args {
-    /// Path to a GGUF model file.
-    #[arg(short, long, value_name = "PATH")]
-    model: PathBuf,
+async fn run(config: &'static StartupConfig) -> Result<()> {
+    let input = if config.prompt == "-" {
+        stdin_message(BufReader::new(io::stdin())).await?
+    } else {
+        ensure!(!config.prompt.trim().is_empty(), "prompt cannot be empty");
+        Message::new(stream::iter([Ok(config.prompt.clone())]))
+    };
 
-    /// Prompt text. Use - to read UTF-8 text from stdin.
-    #[arg(short, long, value_name = "TEXT")]
-    prompt: String,
+    let harness = spawn_blocking(move || -> Result<Harness> {
+        let mut harness = Harness::new(&config.settings)?;
+        let model_id = ModelId {
+            provider: &config.settings.app.provider,
+            model: &config.settings.app.model,
+        };
+        harness.create_session("cli", &[("default", model_id)])?;
+        Ok(harness)
+    })
+    .await
+    .context("failed to start the CLI session")??;
+    let mut replies = harness
+        .session("cli")?
+        .stream("default", input.into_stream())?;
 
-    /// Total token budget for the prompt and response (defaults to 4096 or the model's limit, whichever is lower).
-    #[arg(short, long, value_name = "TOKENS")]
-    context_length: Option<NonZeroU32>,
-
-    /// Maximum number of tokens to generate.
-    #[arg(long, default_value = "256", value_name = "TOKENS")]
-    max_tokens: NonZeroU32,
-
-    /// Number of layers to offload to the GPU (requires a CUDA build).
-    #[arg(long, default_value_t = 0, value_name = "LAYERS")]
-    gpu_layers: u32,
-
-    /// Show llama.cpp diagnostics on stderr.
-    #[arg(long)]
-    verbose: bool,
-}
-
-fn run(args: Args) -> Result<()> {
-    let mut prompt = args.prompt;
-    if prompt == "-" {
-        prompt.clear();
-        io::stdin()
-            .read_to_string(&mut prompt)
-            .context("failed to read UTF-8 prompt from stdin")?;
+    let mut stdout = io::stdout();
+    let mut needs_newline = false;
+    while let Some(frame) = replies.next().await {
+        match frame? {
+            Frame::Begin => needs_newline = false,
+            Frame::Chunk(text) if !text.is_empty() => {
+                stdout.write_all(text.as_bytes()).await?;
+                stdout.flush().await?;
+                needs_newline = !text.ends_with('\n');
+            }
+            Frame::End if needs_newline => stdout.write_all(b"\n").await?,
+            _ => {}
+        }
     }
-    ensure!(!prompt.trim().is_empty(), "prompt cannot be empty");
-
-    let harness = Harness::new(LlamaCPPConfig {
-        context_length: args.context_length,
-        max_tokens: args.max_tokens,
-        verbose: args.verbose,
-    })?;
-    let model = harness.load_model(&args.model, args.gpu_layers)?;
-    let response = Agent::new(&harness).prompt(&model, &prompt)?;
-
-    let mut stdout = io::stdout().lock();
-    stdout.write_all(response.as_bytes())?;
-    if !response.is_empty() && !response.ends_with('\n') {
-        stdout.write_all(b"\n")?;
-    }
-    stdout.flush()?;
+    stdout.flush().await?;
     Ok(())
 }
 
-fn main() -> ExitCode {
-    match run(Args::parse()) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!("error: {error:#}");
-            ExitCode::FAILURE
+async fn stdin_message(mut input: impl AsyncBufRead + Unpin + Send + 'static) -> Result<Message> {
+    // Check for a non-blank prompt before opening the model.
+    let mut prefix = String::new();
+    loop {
+        let start = prefix.len();
+        let bytes = input
+            .read_line(&mut prefix)
+            .await
+            .context("failed to read UTF-8 prompt from stdin")?;
+        ensure!(bytes != 0, "prompt cannot be empty");
+        if !prefix[start..].trim().is_empty() {
+            break;
         }
     }
+
+    let rest = stream::try_unfold(input, |mut input| async move {
+        let mut line = String::new();
+        let bytes = input
+            .read_line(&mut line)
+            .await
+            .context("failed to read UTF-8 prompt from stdin")?;
+        Ok((bytes != 0).then_some((line, input)))
+    });
+    Ok(Message::new(stream::iter([Ok(prefix)]).chain(rest)))
+}
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> ExitCode {
+    let config = match config::get() {
+        Ok(config) => config,
+        Err(error) => return report_error(error),
+    };
+    match run(config).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => report_error(&error),
+    }
+}
+
+fn report_error(error: &anyhow::Error) -> ExitCode {
+    eprintln!("error: {error:#}");
+    ExitCode::FAILURE
 }

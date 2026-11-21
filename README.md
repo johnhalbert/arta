@@ -24,6 +24,18 @@ If you move the executable, keep the native libraries from Cargo in the same dir
 
 To run `arta` through Cargo, add the same `arta` arguments after `cargo run --release --`.
 
+## Configure providers
+
+Copy `config.example.toml` to `config.toml`. Use `[app]` to select the provider and model. Set model paths relative to the config file.
+
+To select a different config file, use `--config PATH`. To change the selection for one prompt, use `--provider ID` or `--model-id ID`.
+
+For llama.cpp, the existing flags override the config values for one run. A relative path with `--model` starts from the working directory. Use `--verbose=false` to disable detailed diagnostics for one run.
+
+```powershell
+.\target\release\arta.exe --config config.toml --prompt "Hello" --max-tokens 32
+```
+
 ## Prompt input and output
 
 Use `--prompt -` to read UTF-8 text from standard input (`stdin`). `arta` writes the response to standard output (`stdout`). Use `--verbose` to see full llama.cpp diagnostics on standard error (`stderr`).

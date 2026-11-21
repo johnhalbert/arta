@@ -1,18 +1,28 @@
-use crate::harness::Harness;
-use crate::provider::Provider;
+use crate::{model::Model, provider::Provider, stream::Message};
 use anyhow::Result;
+use std::sync::Arc;
 
-pub struct Agent<'harness, P> {
-    harness: &'harness Harness<P>,
+/// Runs prompts against a model selected when the agent is created.
+pub struct Agent {
+    model: Arc<dyn Model>,
+    provider: Arc<dyn Provider>,
 }
 
-impl<'harness, P: Provider> Agent<'harness, P> {
-    pub fn new(harness: &'harness Harness<P>) -> Self {
-        Self { harness }
+impl Agent {
+    pub(crate) fn new(provider: Arc<dyn Provider>, model: Arc<dyn Model>) -> Self {
+        Self { model, provider }
     }
 
-    /// Run one independent prompt and return the provider's response.
-    pub fn prompt(&self, model: &P::Model<'harness>, prompt: &str) -> Result<String> {
-        self.harness.send(model, prompt)
+    pub fn provider(&self) -> &dyn Provider {
+        self.provider.as_ref()
+    }
+
+    pub fn model(&self) -> &dyn Model {
+        self.model.as_ref()
+    }
+
+    /// Run one independent prompt against the agent's model.
+    pub async fn prompt(&self, prompt: &str) -> Result<Message> {
+        self.provider.send(self.model.id(), prompt).await
     }
 }
