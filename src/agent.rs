@@ -1,17 +1,17 @@
 use crate::provider::Provider;
 use anyhow::Result;
 
-pub struct Agent<P> {
-    provider: P,
+pub struct Agent<'provider, P> {
+    provider: &'provider P,
 }
 
-impl<P: Provider> Agent<P> {
-    pub fn new(provider: P) -> Self {
+impl<'provider, P: Provider> Agent<'provider, P> {
+    pub fn new(provider: &'provider P) -> Self {
         Self { provider }
     }
 
     /// Run one independent prompt and return the provider's response.
-    pub fn prompt(&self, message: &str) -> Result<String> {
-        self.provider.send(message)
+    pub fn prompt(&self, model: &P::Model<'provider>, prompt: &str) -> Result<String> {
+        self.provider.send(model, prompt)
     }
 }

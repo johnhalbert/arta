@@ -1,54 +1,54 @@
-use super::Provider;
-use anyhow::{Context, Result, ensure};
-use llama_cpp_4::StringFromModelError;
-pub use llama_cpp_4::llama_backend::LlamaBackend;
-use llama_cpp_4::prelude::*;
-use serde_json::json;
-use std::{num::NonZeroU32, path::PathBuf};
+mod model;
 
-pub struct LlamaCPP<'backend> {
-    templates: Option<ChatTemplates>,
-    model: LlamaModel,
-    backend: &'backend LlamaBackend,
-    context_length: NonZeroU32,
+use super::Provider;
+use crate::model::Model;
+use anyhow::{Context, Result, ensure};
+use llama_cpp_4::prelude::{LlamaBackend, LlamaBatch, LlamaSampler, Special};
+pub use model::LlamaCPPModel;
+use std::{num::NonZeroU32, path::Path};
+
+pub struct LlamaCPP {
+    backend: LlamaBackend,
+    context_length: Option<NonZeroU32>,
     max_tokens: NonZeroU32,
 }
 
 pub struct LlamaCPPConfig {
-    pub model_path: PathBuf,
     pub context_length: Option<NonZeroU32>,
     pub max_tokens: NonZeroU32,
-    pub gpu_layers: u32,
+    pub verbose: bool,
 }
 
-impl<'backend> LlamaCPP<'backend> {
-    /// Load a model using an initialized backend that can be shared by providers.
-    pub fn new(backend: &'backend LlamaBackend, config: LlamaCPPConfig) -> Result<Self> {
-        let path = &config.model_path;
-        let metadata = path
-            .metadata()
-            .with_context(|| format!("cannot access model '{}'", path.display()))?;
-        ensure!(
-            metadata.is_file(),
-            "model '{}' must be a file",
-            path.display()
-        );
+impl LlamaCPP {
+    /// Initialize the llama.cpp backend for this provider.
+    pub fn new(config: LlamaCPPConfig) -> Result<Self> {
+        let mut backend = LlamaBackend::init().context("failed to initialize llama.cpp")?;
+        if !config.verbose {
+            backend.void_logs();
+        }
+        Ok(Self {
+            backend,
+            context_length: config.context_length,
+            max_tokens: config.max_tokens,
+        })
+    }
 
-        ensure!(
-            config.gpu_layers == 0 || (cfg!(feature = "cuda") && supports_gpu_offload()),
-            "GPU offload is unavailable. Build with --features cuda and use a CUDA device, or set --gpu-layers 0"
-        );
+    /// Load a GGUF model that this provider can use for inference.
+    pub fn load_model(&self, path: impl AsRef<Path>, gpu_layers: u32) -> Result<LlamaCPPModel<'_>> {
+        LlamaCPPModel::load(&self.backend, path.as_ref(), gpu_layers)
+    }
+}
 
-        let parameters = LlamaModelParams::default().with_n_gpu_layers(config.gpu_layers);
-        let model = LlamaModel::load_from_file(backend, path, &parameters)
-            .with_context(|| format!("failed to load GGUF model '{}'", path.display()))?;
-        ensure!(
-            model.has_decoder() && !model.has_encoder() && !model.is_diffusion(),
-            "model '{}' does not support decoder-only text generation",
-            path.display()
-        );
-        let trained_context_length = model.n_ctx_train();
-        let context_length = config
+impl Provider for LlamaCPP {
+    type Model<'provider> = LlamaCPPModel<'provider>;
+
+    fn send<'provider>(
+        &'provider self,
+        model: &Self::Model<'provider>,
+        prompt: &str,
+    ) -> Result<String> {
+        let trained_context_length = model.trained_context_length();
+        let context_length = self
             .context_length
             .or_else(|| NonZeroU32::new(trained_context_length.min(4096)))
             .context("model has no usable context length")?;
@@ -61,73 +61,19 @@ impl<'backend> LlamaCPP<'backend> {
             "context length exceeds llama.cpp's token position limit"
         );
 
-        let templates = match model.chat_template(None) {
-            Ok(template) if !template.is_empty() => Some(
-                ChatTemplates::from_model(&model, None).context("invalid model chat template")?,
-            ),
-            Ok(_) | Err(StringFromModelError::ReturnedError(-1)) => None,
-            Err(error) => return Err(error).context("failed to read model chat template"),
-        };
-
-        Ok(Self {
-            model,
-            templates,
-            backend,
-            context_length,
-            max_tokens: config.max_tokens,
-        })
-    }
-
-    fn prepare_prompt(&self, message: &str) -> Result<(Vec<LlamaToken>, Vec<String>)> {
-        let add_bos = if self.model.get_vocab().get_add_bos() {
-            AddBos::Always
-        } else {
-            AddBos::Never
-        };
-        if let Some(templates) = &self.templates {
-            let messages = json!([{ "role": "user", "content": message }]);
-            let params = ChatApplyParams::new(messages.to_string()).with_enable_thinking(false);
-            let chat = templates
-                .apply(&params)
-                .context("failed to format prompt")?;
-            let tokens = chat
-                .tokenize_prompt(&self.model, add_bos)
-                .context("failed to tokenize chat prompt")?;
-            let mut stops: Vec<String> = serde_json::from_str(&chat.additional_stops_json)
-                .context("failed to read chat template stop strings")?;
-            stops.retain(|stop| !stop.is_empty());
-            return Ok((tokens, stops));
-        }
-
-        let tokens = self
-            .model
-            .str_to_token_with_special(message, add_bos, Special::Plaintext)
-            .context("failed to tokenize prompt")?;
-        Ok((tokens, Vec::new()))
-    }
-}
-
-impl Provider for LlamaCPP<'_> {
-    fn send(&self, message: &str) -> Result<String> {
-        ensure!(!message.contains('\0'), "prompt contains a NUL character");
-        let (tokens, stops) = self.prepare_prompt(message)?;
+        ensure!(!prompt.contains('\0'), "prompt contains a NUL character");
+        let (tokens, stops) = model.prepare_prompt(prompt)?;
         ensure!(!tokens.is_empty(), "prompt produced no tokens");
-        let context_length = self.context_length.get() as usize;
+        let context_capacity = context_length.get() as usize;
         ensure!(
-            tokens.len() < context_length,
+            tokens.len() < context_capacity,
             "prompt uses {} tokens and leaves no room for a response in the {context_length}-token context. Shorten the prompt or increase --context-length",
             tokens.len()
         );
 
         // Each prompt gets a fresh context while sharing the loaded model.
-        let mut ctx = self
-            .model
-            .new_context(
-                self.backend,
-                LlamaContextParams::default().with_n_ctx(Some(self.context_length)),
-            )
-            .context("failed to create inference context")?;
-        let capacity = context_length.min(ctx.n_ctx_seq() as usize);
+        let mut ctx = model.new_context(context_length)?;
+        let capacity = context_capacity.min(ctx.n_ctx_seq() as usize);
         ensure!(
             tokens.len() < capacity,
             "prompt exceeds the usable inference context"
@@ -156,11 +102,11 @@ impl Provider for LlamaCPP<'_> {
             let token = sampler
                 .try_sample(&ctx, -1)
                 .context("failed to sample response")?;
-            if self.model.is_eog_token(token) {
+            if model.inner.is_eog_token(token) {
                 break;
             }
             let previous_length = output.len();
-            output.extend(self.model.token_to_bytes(token, Special::Plaintext)?);
+            output.extend(model.inner.token_to_bytes(token, Special::Plaintext)?);
             if let Some(position) = stops
                 .iter()
                 .filter_map(|stop| {

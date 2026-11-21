@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, ensure};
 use arta::{
     agent::Agent,
-    provider::llama_cpp::{LlamaBackend, LlamaCPP, LlamaCPPConfig},
+    provider::llama_cpp::{LlamaCPP, LlamaCPPConfig},
 };
 use clap::Parser;
 use std::{
@@ -49,20 +49,13 @@ fn run(args: Args) -> Result<()> {
     }
     ensure!(!prompt.trim().is_empty(), "prompt cannot be empty");
 
-    let mut backend = LlamaBackend::init().context("failed to initialize llama.cpp")?;
-    if !args.verbose {
-        backend.void_logs();
-    }
-    let provider = LlamaCPP::new(
-        &backend,
-        LlamaCPPConfig {
-            model_path: args.model,
-            context_length: args.context_length,
-            max_tokens: args.max_tokens,
-            gpu_layers: args.gpu_layers,
-        },
-    )?;
-    let response = Agent::new(provider).prompt(&prompt)?;
+    let provider = LlamaCPP::new(LlamaCPPConfig {
+        context_length: args.context_length,
+        max_tokens: args.max_tokens,
+        verbose: args.verbose,
+    })?;
+    let model = provider.load_model(&args.model, args.gpu_layers)?;
+    let response = Agent::new(&provider).prompt(&model, &prompt)?;
 
     let mut stdout = io::stdout().lock();
     stdout.write_all(response.as_bytes())?;
