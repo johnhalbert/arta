@@ -1,23 +1,45 @@
 # arta
 
-Run a single prompt against a local GGUF model with llama.cpp.
+`arta` uses llama.cpp to process one prompt with a model in a local GGUF file.
 
-Build with Rust, CMake, a C++ compiler, and LLVM's `libclang`. On Windows, use the Visual Studio C++ Build Tools.
+## Build and run on Windows
 
-Place a local GGUF model under `gguf/` or pass its path with `--model`. Model weights are stored locally.
+To build `arta`, you need Rust, CMake, a C++ compiler, and LLVM's `libclang`. On Windows, use the Visual Studio C++ Build Tools.
 
-```powershell
-cargo build --locked --release
-.\target\release\arta.exe --model .\gguf\Qwen3.5-4B-Q4_0.gguf --prompt "Reply with one sentence about the Moon."
-```
+1. Build the release executable.
 
-Keep the native libraries Cargo places alongside the executable if you move it. You can also invoke the CLI with `cargo run --release --` followed by the same arguments.
+   ```powershell
+   cargo build --locked --release
+   ```
 
-Use `--prompt -` to read UTF-8 text from stdin. The response goes to stdout. Use `--verbose` to see full llama.cpp diagnostics on stderr. Models with a chat template receive a single user message, with thinking disabled where the template supports it. Models without a template receive the prompt as plain text.
+2. Specify the local GGUF file with `--model`. The example uses a file in `gguf/`.
 
-`--context-length` controls the combined prompt and response budget and defaults to 4096 tokens or the model's trained limit, whichever is lower. `--max-tokens` caps generation and defaults to 256.
+3. Run the executable with your prompt.
 
-For GPU offload, build with the NVIDIA CUDA Toolkit installed and pass the number of layers to offload.
+   ```powershell
+   .\target\release\arta.exe --model .\gguf\Qwen3.5-4B-Q4_0.gguf --prompt "Reply with one sentence about the Moon."
+   ```
+
+If you move the executable, keep the native libraries from Cargo in the same directory as the executable.
+
+To run `arta` through Cargo, add the same `arta` arguments after `cargo run --release --`.
+
+## Prompt input and output
+
+Use `--prompt -` to read UTF-8 text from standard input (`stdin`). `arta` writes the response to standard output (`stdout`). Use `--verbose` to see full llama.cpp diagnostics on standard error (`stderr`).
+
+If the model has a chat template, `arta` passes the prompt as one user message. If the template supports a thinking setting, `arta` disables thinking. If the model has no chat template, `arta` passes the prompt as plain text.
+
+## Token limits
+
+- `--context-length` sets the total number of tokens available for the prompt and response. The default is 4096 tokens or the model's trained context length, whichever is lower.
+- `--max-tokens` sets the maximum number of tokens `arta` can generate. The default is 256 tokens.
+
+## Use a GPU
+
+1. Install the NVIDIA CUDA Toolkit.
+2. Use the `cuda` feature when you build `arta`.
+3. Use `--gpu-layers` to specify how many model layers the GPU processes.
 
 ```powershell
 cargo run --locked --release --features cuda --target-dir target/cuda -- --model .\gguf\Qwen3.5-4B-Q4_0.gguf --prompt "Hello" --gpu-layers 20
