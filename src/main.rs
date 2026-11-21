@@ -1,8 +1,5 @@
 use anyhow::{Context, Result, ensure};
-use arta::{
-    agent::Agent,
-    provider::llama_cpp::{LlamaCPP, LlamaCPPConfig},
-};
+use arta::{agent::Agent, harness::Harness, provider::llama_cpp::LlamaCPPConfig};
 use clap::Parser;
 use std::{
     io::{self, Read, Write},
@@ -49,13 +46,13 @@ fn run(args: Args) -> Result<()> {
     }
     ensure!(!prompt.trim().is_empty(), "prompt cannot be empty");
 
-    let provider = LlamaCPP::new(LlamaCPPConfig {
+    let harness = Harness::new(LlamaCPPConfig {
         context_length: args.context_length,
         max_tokens: args.max_tokens,
         verbose: args.verbose,
     })?;
-    let model = provider.load_model(&args.model, args.gpu_layers)?;
-    let response = Agent::new(&provider).prompt(&model, &prompt)?;
+    let model = harness.load_model(&args.model, args.gpu_layers)?;
+    let response = Agent::new(&harness).prompt(&model, &prompt)?;
 
     let mut stdout = io::stdout().lock();
     stdout.write_all(response.as_bytes())?;

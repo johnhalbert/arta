@@ -1,4 +1,4 @@
-use arta::{agent::Agent, model::Model, provider::Provider};
+use arta::{agent::Agent, harness::Harness, model::Model, provider::Provider};
 
 struct TestModel(&'static str);
 
@@ -26,8 +26,8 @@ impl Provider for TestProvider {
 fn agent_uses_the_model_selected_for_each_prompt() -> anyhow::Result<()> {
     let first = TestModel("first model");
     let second = TestModel("second model");
-    let provider = TestProvider;
-    let agent = Agent::new(&provider);
+    let harness = Harness::with_provider(TestProvider);
+    let agent = Agent::new(&harness);
 
     assert_eq!(agent.prompt(&first, "Hello")?, "Hello from first model");
     assert_eq!(agent.prompt(&second, "Hello")?, "Hello from second model");

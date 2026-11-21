@@ -1,17 +1,18 @@
+use crate::harness::Harness;
 use crate::provider::Provider;
 use anyhow::Result;
 
-pub struct Agent<'provider, P> {
-    provider: &'provider P,
+pub struct Agent<'harness, P> {
+    harness: &'harness Harness<P>,
 }
 
-impl<'provider, P: Provider> Agent<'provider, P> {
-    pub fn new(provider: &'provider P) -> Self {
-        Self { provider }
+impl<'harness, P: Provider> Agent<'harness, P> {
+    pub fn new(harness: &'harness Harness<P>) -> Self {
+        Self { harness }
     }
 
     /// Run one independent prompt and return the provider's response.
-    pub fn prompt(&self, model: &P::Model<'provider>, prompt: &str) -> Result<String> {
-        self.provider.send(model, prompt)
+    pub fn prompt(&self, model: &P::Model<'harness>, prompt: &str) -> Result<String> {
+        self.harness.send(model, prompt)
     }
 }
