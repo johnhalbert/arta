@@ -26,7 +26,7 @@ use std::{
 use tokio::time::{MissedTickBehavior, interval};
 use unicode_segmentation::UnicodeSegmentation;
 
-const BUSY_SPINNER: [&str; 4] = ["◐", "◓", "◑", "◒"];
+const BUSY_FRAMES: [&str; 6] = [".", "..", "...", " ..", "  .", ""];
 
 pub(super) async fn run(repl: &mut Repl<'_>) -> Result<()> {
     let mut screen = Screen::enter()?;
@@ -110,7 +110,7 @@ struct Tui {
     scroll: Option<u16>,
     latest: u16,
     page: u16,
-    spinner_frame: usize,
+    busy_frame: usize,
     failure: Option<(Turn, String)>,
 }
 
@@ -173,7 +173,7 @@ impl Tui {
     ) -> Result<bool> {
         self.scroll = None;
         self.failure = None;
-        self.spinner_frame = 0;
+        self.busy_frame = 0;
         let mut turn = Turn {
             prompt,
             reply: String::new(),
@@ -205,9 +205,9 @@ impl Tui {
                 },
                 _ = refresh.tick(), if dirty || turn.reply.is_empty() => {
                     let waiting = turn.reply.is_empty();
-                    let next = (started.elapsed().as_millis() / 120 % BUSY_SPINNER.len() as u128) as usize;
-                    if dirty || (waiting && next != self.spinner_frame) {
-                        self.spinner_frame = next;
+                    let next = (started.elapsed().as_millis() / 120 % BUSY_FRAMES.len() as u128) as usize;
+                    if dirty || (waiting && next != self.busy_frame) {
+                        self.busy_frame = next;
                         screen.draw(|frame| self.render(frame, repl.history(), Some(&turn)))?;
                         dirty = false;
                     }
@@ -246,7 +246,7 @@ impl Tui {
         if let Some(turn) = pending {
             append_turn(&mut lines, turn);
             if turn.reply.is_empty() {
-                lines.push(Line::raw(BUSY_SPINNER[self.spinner_frame]).green());
+                lines.push(Line::raw(BUSY_FRAMES[self.busy_frame]).green());
             }
         }
         if let Some((turn, error)) = &self.failure {
@@ -455,24 +455,24 @@ mod tests {
     }
 
     #[test]
-    fn first_reply_text_replaces_the_spinner_under_arta() -> Result<()> {
+    fn ellipsis_frames_are_replaced_by_reply_text_under_arta() -> Result<()> {
         let mut terminal = Terminal::new(TestBackend::new(60, 24))?;
         let mut tui = Tui::default();
         let mut pending = Turn {
             prompt: "Hello".into(),
             reply: String::new(),
         };
-        terminal.draw(|frame| tui.render(frame, &[], Some(&pending)))?;
-        let buffer = terminal.backend().buffer();
-        assert_eq!(buffer[(0, 19)].symbol(), "A");
-        assert_eq!(buffer[(0, 20)].symbol(), BUSY_SPINNER[0]);
-
-        tui.spinner_frame = 1;
-        terminal.draw(|frame| tui.render(frame, &[], Some(&pending)))?;
-        assert_eq!(
-            terminal.backend().buffer()[(0, 20)].symbol(),
-            BUSY_SPINNER[1]
-        );
+        for (index, expected) in [".  ", ".. ", "...", " ..", "  .", "   "]
+            .into_iter()
+            .enumerate()
+        {
+            tui.busy_frame = index;
+            terminal.draw(|frame| tui.render(frame, &[], Some(&pending)))?;
+            let buffer = terminal.backend().buffer();
+            assert_eq!(buffer[(0, 19)].symbol(), "A");
+            let indicator: String = (0..3).map(|column| buffer[(column, 20)].symbol()).collect();
+            assert_eq!(indicator, expected);
+        }
 
         pending.reply.push_str("Hi");
         terminal.draw(|frame| tui.render(frame, &[], Some(&pending)))?;

@@ -44,7 +44,7 @@ Set up `config.toml` in your working directory, then run `arta` with no argument
 .\target\release\arta.exe
 ```
 
-The full-screen view has two empty panes across the top and a conversation in the bottom half. Press Enter to send a prompt. A spinner appears below Arta's name until the reply starts streaming. Use Page Up and Page Down to read earlier turns, or Ctrl+End to return to the latest reply. Enter `/reset` to clear the conversation, or use `/exit` or Ctrl+C to quit.
+The full-screen view has two empty panes across the top and a conversation in the bottom half. Press Enter to send a prompt. Animated dots appear below Arta's name until the reply starts streaming. Use Page Up and Page Down to read earlier turns, or Ctrl+End to return to the latest reply. Enter `/reset` to clear the conversation, or use `/exit` or Ctrl+C to quit.
 
 With redirected input or output, `arta` reads one prompt per line and writes replies to standard output. `/reset`, `/exit`, and end-of-input work in this mode.
 
