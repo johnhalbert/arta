@@ -3,9 +3,10 @@ mod template;
 use crate::{model::Model, provider::Turn};
 use anyhow::{Context, Result, ensure};
 use llama_cpp_4::prelude::{
-    LlamaBackend, LlamaContext, LlamaContextParams, LlamaModel, LlamaModelParams, LlamaToken,
-    supports_gpu_offload,
+    ChatTemplates, LlamaBackend, LlamaContext, LlamaContextParams, LlamaModel, LlamaModelParams,
+    LlamaToken, supports_gpu_offload,
 };
+use serde_json::{Value, json};
 use std::{num::NonZeroU32, path::Path, sync::Arc};
 use template::ModelTemplate;
 
@@ -73,6 +74,10 @@ impl LlamaCPPModel {
             )
             .context("failed to create inference context")
     }
+
+    pub(super) fn tool_template(&self) -> Result<&ChatTemplates> {
+        self.template.tool_template()
+    }
 }
 
 impl Model for LlamaCPPModel {
@@ -83,4 +88,14 @@ impl Model for LlamaCPPModel {
     fn trained_context_length(&self) -> u32 {
         self.inner.n_ctx_train()
     }
+}
+
+pub(super) fn chat_messages(history: &[Turn], prompt: &str) -> Vec<Value> {
+    let mut messages = Vec::with_capacity(history.len() * 2 + 1);
+    for turn in history {
+        messages.push(json!({ "role": "user", "content": turn.prompt }));
+        messages.push(json!({ "role": "assistant", "content": turn.reply }));
+    }
+    messages.push(json!({ "role": "user", "content": prompt }));
+    messages
 }

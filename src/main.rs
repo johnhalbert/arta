@@ -32,7 +32,7 @@ async fn run_once(config: &'static Config, prompt: &str) -> Result<()> {
 }
 
 async fn cli_harness(config: &'static Config, fullscreen: bool) -> Result<Harness> {
-    spawn_blocking(move || -> Result<Harness> {
+    let mut harness = spawn_blocking(move || -> Result<Harness> {
         let mut quiet_config;
         let config = if fullscreen {
             // Native diagnostics would write over the alternate screen during inference.
@@ -44,16 +44,17 @@ async fn cli_harness(config: &'static Config, fullscreen: bool) -> Result<Harnes
         } else {
             config
         };
-        let mut harness = Harness::new(config)?;
-        let model_id = ModelId {
-            provider: &config.app.provider,
-            model: &config.app.model,
-        };
-        harness.create_session("cli", &[("default", model_id)])?;
-        Ok(harness)
+        Harness::new(config)
     })
     .await
-    .context("failed to start the CLI session")?
+    .context("failed to start the CLI harness")??;
+    harness.connect_mcp(config).await?;
+    let model_id = ModelId {
+        provider: &config.app.provider,
+        model: &config.app.model,
+    };
+    harness.create_session("cli", &[("default", model_id)])?;
+    Ok(harness)
 }
 
 async fn run_conversation(config: &'static Config) -> Result<()> {

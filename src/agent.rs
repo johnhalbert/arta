@@ -1,7 +1,8 @@
 use crate::{
     model::Model,
-    provider::{Provider, Turn},
+    provider::{Provider, Turn, tool},
     stream::Message,
+    tool::Tools,
 };
 use anyhow::Result;
 use std::sync::Arc;
@@ -10,11 +11,20 @@ use std::sync::Arc;
 pub struct Agent {
     model: Arc<dyn Model>,
     provider: Arc<dyn Provider>,
+    tools: Arc<Tools>,
 }
 
 impl Agent {
-    pub(crate) fn new(provider: Arc<dyn Provider>, model: Arc<dyn Model>) -> Self {
-        Self { model, provider }
+    pub(crate) fn new(
+        provider: Arc<dyn Provider>,
+        model: Arc<dyn Model>,
+        tools: Arc<Tools>,
+    ) -> Self {
+        Self {
+            model,
+            provider,
+            tools,
+        }
     }
 
     pub fn provider(&self) -> &dyn Provider {
@@ -27,11 +37,18 @@ impl Agent {
 
     /// Run one independent prompt against the agent's model.
     pub async fn prompt(&self, prompt: &str) -> Result<Message> {
-        self.provider.send(self.model.id(), prompt).await
+        tool::send(self.provider(), self.model.id(), prompt, &self.tools).await
     }
 
     /// Run a prompt with conversation history supplied by the caller.
     pub async fn chat(&self, history: &[Turn], prompt: &str) -> Result<Message> {
-        self.provider.chat(self.model.id(), history, prompt).await
+        tool::chat(
+            self.provider(),
+            self.model.id(),
+            history,
+            prompt,
+            &self.tools,
+        )
+        .await
     }
 }

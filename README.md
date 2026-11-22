@@ -50,6 +50,16 @@ With redirected input or output, `arta` reads one prompt per line and writes rep
 
 The current conversation counts toward the context limit. Use `/reset` to start a fresh conversation if the history fills the context.
 
+## Use tools during inference
+
+Configure MCP servers under `[mcp.servers]` to make their tools available in one-shot prompts and interactive conversations. For a local stdio server, set `command` and optional `args` and `env`. The process starts in the config file's directory. For a Streamable HTTP server, set `url` and optionally set `bearer_token_env` to the name of an environment variable containing its bearer token. See `config.example.toml` for both forms.
+
+Arta discovers tools at startup and exposes them as `server__tool` names, with periods replaced by underscores. Set `tools` on a server to list the original names to expose. Omitting it exposes every tool the server advertises. The model can invoke exposed tools automatically, so configure servers and tools you trust to run.
+
+The llama.cpp model needs an embedded chat template that supports tool calls. Arta runs up to eight calls per prompt and feeds text or structured JSON results back into the model. Tool schemas and results count toward the context limit. Each inference step has its own `max_tokens` budget. With tools enabled, Arta buffers inference steps and displays the final reply when it is ready.
+
+Rust callers can implement `arta::tool::Tool` and use `Harness::register_tool` for in-process tools. Call `Harness::connect_mcp` to load configured MCP tools. Create sessions after registering tools so their agents receive the resulting tool set.
+
 ## One-shot input and output
 
 Use `--prompt -` to read UTF-8 text from standard input (`stdin`). `arta` writes the response to standard output (`stdout`). Use `--verbose` to see full llama.cpp diagnostics on standard error (`stderr`).

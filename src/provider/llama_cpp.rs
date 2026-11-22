@@ -1,15 +1,19 @@
 mod config;
 mod model;
 mod text;
+mod tool;
 
-use super::{Provider, Turn, registry::ProviderRegistration};
+use super::{Provider, Turn, registry::ProviderRegistration, tool::ToolAdapter};
 use crate::{config::Config, model::Model, stream::Message};
 use anyhow::{Context, Result, bail, ensure};
 pub use config::{LlamaCPPConfig, LlamaCPPModelConfig, LlamaCPPOverrides};
 use futures_util::{future::BoxFuture, stream};
-use llama_cpp_4::prelude::{LlamaBackend, LlamaBatch, LlamaSampler, Special};
+use llama_cpp_4::prelude::{
+    ChatParams, LlamaBackend, LlamaBatch, LlamaSampler, LlamaToken, Special,
+};
 use model::LlamaCPPModel;
 use std::{
+    cell::Cell,
     collections::{HashMap, hash_map::Entry},
     num::NonZeroU32,
     sync::Arc,
@@ -93,6 +97,10 @@ impl Provider for LlamaCPP {
         self.chat(model_id, &[], prompt)
     }
 
+    fn tool_adapter(&self) -> Option<&dyn ToolAdapter> {
+        Some(self)
+    }
+
     fn chat<'a>(
         &'a self,
         model_id: &'a str,
@@ -113,17 +121,20 @@ impl Provider for LlamaCPP {
                 if sender.is_closed() {
                     return Ok(());
                 }
-                let mut chunks = generate(
+                ensure!(!prompt.contains('\0'), "prompt contains a NUL character");
+                let (tokens, stops) = model.prepare_prompt(&history, &prompt)?;
+                let pieces = generate(
                     &model,
-                    &history,
-                    &prompt,
+                    tokens,
                     context_length,
                     max_tokens,
+                    Sampling::Text,
                     || sender.is_closed(),
                 )?;
                 if ready.send(()).is_err() {
                     return Ok(());
                 }
+                let mut chunks = text::text_chunks(pieces, stops);
                 while !sender.is_closed() {
                     let Some(chunk) = chunks.next() else { break };
                     if sender.blocking_send(chunk?).is_err() {
@@ -155,14 +166,22 @@ impl Provider for LlamaCPP {
     }
 }
 
-fn generate(
-    model: &LlamaCPPModel,
-    history: &[Turn],
-    prompt: &str,
+enum Sampling<'a> {
+    Text,
+    Tools {
+        chat: &'a ChatParams,
+        exhausted: &'a Cell<bool>,
+    },
+}
+
+fn generate<'a>(
+    model: &'a LlamaCPPModel,
+    tokens: Vec<LlamaToken>,
     context_length: Option<NonZeroU32>,
     max_tokens: NonZeroU32,
-    cancelled: impl Fn() -> bool,
-) -> Result<impl Iterator<Item = Result<String>>> {
+    sampling: Sampling<'a>,
+    cancelled: impl Fn() -> bool + 'a,
+) -> Result<impl Iterator<Item = Result<Vec<u8>>> + 'a> {
     let trained_context_length = model.trained_context_length();
     let context_length = context_length
         .or_else(|| NonZeroU32::new(trained_context_length.min(4096)))
@@ -176,8 +195,6 @@ fn generate(
         "context length exceeds llama.cpp's token position limit"
     );
 
-    ensure!(!prompt.contains('\0'), "prompt contains a NUL character");
-    let (tokens, stops) = model.prepare_prompt(history, prompt)?;
     ensure!(!tokens.is_empty(), "prompt produced no tokens");
     let context_capacity = context_length.get() as usize;
     ensure!(
@@ -211,11 +228,18 @@ fn generate(
         ctx.decode(&mut batch).context("failed to decode prompt")?;
     }
 
-    let sampler = LlamaSampler::greedy();
+    let grammar = match sampling {
+        Sampling::Text => None,
+        Sampling::Tools { chat, .. } => chat.grammar_sampler(&model.inner),
+    };
+    let sampler = match grammar {
+        Some(grammar) => LlamaSampler::chain_simple([grammar, LlamaSampler::greedy()]),
+        None => LlamaSampler::greedy(),
+    };
     let limit = (max_tokens.get() as usize).min(capacity - tokens.len());
     let mut previous_token = None;
-    let pieces = (0..limit)
-        .map(move |_| -> Result<Option<Vec<u8>>> {
+    Ok((0..limit)
+        .map(move |index| -> Result<Option<Vec<u8>>> {
             if cancelled() {
                 return Ok(None);
             }
@@ -234,9 +258,14 @@ fn generate(
                 return Ok(None);
             }
             previous_token = Some(token);
-            Ok(Some(model.inner.token_to_bytes(token, Special::Plaintext)?))
+            let bytes = match sampling {
+                Sampling::Text => model.inner.token_to_bytes(token, Special::Plaintext)?,
+                Sampling::Tools { exhausted, .. } => {
+                    exhausted.set(index + 1 == limit);
+                    model.inner.token_to_raw_bytes(token, Special::Tokenize)?
+                }
+            };
+            Ok(Some(bytes))
         })
-        .map_while(Result::transpose);
-
-    Ok(text::text_chunks(pieces, stops))
+        .map_while(Result::transpose))
 }

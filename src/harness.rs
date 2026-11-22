@@ -2,12 +2,14 @@ use crate::{
     agent::Agent,
     config::Config,
     model::{Model, ModelId},
-    provider::{Provider, registry::ProviderRegistry},
+    provider::{Provider, registry::ProviderRegistry, tool},
     session::Session,
+    tool::{Tool, Tools},
 };
 use anyhow::{Context, Result, bail, ensure};
 use std::{
     collections::{HashMap, hash_map::Entry},
+    path::Path,
     sync::Arc,
 };
 
@@ -15,6 +17,7 @@ use std::{
 pub struct Harness {
     sessions: HashMap<String, Session>,
     providers: HashMap<String, Arc<dyn Provider>>,
+    tools: Arc<Tools>,
 }
 
 impl Harness {
@@ -29,6 +32,7 @@ impl Harness {
         let mut harness = Self {
             sessions: HashMap::new(),
             providers: HashMap::new(),
+            tools: Arc::default(),
         };
         for (id, create) in registry.list() {
             harness
@@ -72,6 +76,24 @@ impl Harness {
         self.provider(model.provider)?.model(model.model)
     }
 
+    /// Register a tool for sessions created after this call and for direct sends.
+    pub fn register_tool(&mut self, tool: Arc<dyn Tool>) -> Result<()> {
+        Arc::make_mut(&mut self.tools).register(tool)
+    }
+
+    /// Connect the configured MCP servers and register their tools for new sessions.
+    pub async fn connect_mcp(&mut self, config: &Config) -> Result<()> {
+        if !config.mcp.servers.is_empty() {
+            let mut tools = (*self.tools).clone();
+            config
+                .mcp
+                .register(&config.resolve_path(Path::new(".")), &mut tools)
+                .await?;
+            self.tools = Arc::new(tools);
+        }
+        Ok(())
+    }
+
     /// Create a session with at least one named agent and bind each agent to a model.
     pub fn create_session(
         &mut self,
@@ -91,6 +113,7 @@ impl Harness {
             Ok(Agent::new(
                 Arc::clone(provider),
                 provider.model(model.model)?,
+                Arc::clone(&self.tools),
             ))
         })?;
         self.sessions.insert(session_id.to_owned(), session);
@@ -116,10 +139,14 @@ impl Harness {
     }
 
     pub async fn send(&self, model: ModelId<'_>, prompt: &str) -> Result<String> {
-        self.provider(model.provider)?
-            .send(model.model, prompt)
-            .await?
-            .into_text()
-            .await
+        tool::send(
+            self.provider(model.provider)?,
+            model.model,
+            prompt,
+            &self.tools,
+        )
+        .await?
+        .into_text()
+        .await
     }
 }

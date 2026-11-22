@@ -3,8 +3,16 @@ use std::{iter::from_fn, str};
 
 /// Decode token bytes without exposing partial characters or stop sequences.
 pub(super) fn text_chunks(
+    pieces: impl Iterator<Item = Result<Vec<u8>>>,
+    stops: Vec<String>,
+) -> impl Iterator<Item = Result<String>> {
+    text_chunks_with_stop(pieces, stops, || {})
+}
+
+pub(super) fn text_chunks_with_stop(
     mut pieces: impl Iterator<Item = Result<Vec<u8>>>,
     mut stops: Vec<String>,
+    mut on_stop: impl FnMut(),
 ) -> impl Iterator<Item = Result<String>> {
     stops.retain(|stop| !stop.is_empty());
     let mut pending = Vec::new();
@@ -34,6 +42,7 @@ pub(super) fn text_chunks(
                 })
                 .min()
             {
+                on_stop();
                 finished = true;
                 return (position != 0)
                     .then(|| Ok(String::from_utf8_lossy(&pending[..position]).into_owned()));

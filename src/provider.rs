@@ -1,5 +1,6 @@
 pub mod llama_cpp;
 pub mod registry;
+pub mod tool;
 
 use crate::{model::Model, stream::Message};
 use anyhow::{Result, bail};
@@ -19,6 +20,10 @@ pub trait Provider: Send + Sync {
     fn model(&self, model_id: &str) -> Result<Arc<dyn Model>>;
 
     fn send<'a>(&'a self, model_id: &'a str, prompt: &'a str) -> BoxFuture<'a, Result<Message>>;
+
+    fn tool_adapter(&self) -> Option<&dyn tool::ToolAdapter> {
+        None
+    }
 
     /// Reply using the completed turns in chronological order.
     fn chat<'a>(

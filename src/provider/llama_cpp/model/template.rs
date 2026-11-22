@@ -1,10 +1,11 @@
+use super::chat_messages;
 use crate::provider::Turn;
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail, ensure};
 use llama_cpp_4::{
     StringFromModelError,
     prelude::{AddBos, ChatApplyParams, ChatTemplates, LlamaModel, LlamaToken, Special},
 };
-use serde_json::{Value, json};
+use serde_json::Value;
 
 pub(super) enum ModelTemplate {
     Embedded(ChatTemplates),
@@ -22,6 +23,19 @@ impl ModelTemplate {
         }
     }
 
+    pub(super) fn tool_template(&self) -> Result<&ChatTemplates> {
+        let Self::Embedded(templates) = self else {
+            bail!("tool use requires a model with an embedded chat template");
+        };
+        let caps: Value = serde_json::from_str(&templates.caps_json()?)
+            .context("failed to read chat template capabilities")?;
+        ensure!(
+            caps["supports_tool_calls"].as_bool() == Some(true),
+            "the model's chat template does not support tool calls"
+        );
+        Ok(templates)
+    }
+
     pub(super) fn prepare_prompt(
         &self,
         model: &LlamaModel,
@@ -35,12 +49,7 @@ impl ModelTemplate {
         };
 
         if let Self::Embedded(templates) = self {
-            let mut messages = Vec::with_capacity(history.len() * 2 + 1);
-            for turn in history {
-                messages.push(json!({ "role": "user", "content": turn.prompt }));
-                messages.push(json!({ "role": "assistant", "content": turn.reply }));
-            }
-            messages.push(json!({ "role": "user", "content": prompt }));
+            let messages = chat_messages(history, prompt);
             let params = ChatApplyParams::new(Value::Array(messages).to_string())
                 .with_enable_thinking(false);
             let chat = templates
