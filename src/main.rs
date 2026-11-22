@@ -7,10 +7,11 @@ use arta::{
     harness::Harness,
     model::ModelId,
     provider::llama_cpp::{LlamaCPP, LlamaCPPConfig},
+    skill::ActivateSkill,
     stream::{Frame, Message, Stream},
 };
 use futures_util::{StreamExt, stream};
-use std::{io::IsTerminal, process::ExitCode};
+use std::{io::IsTerminal, process::ExitCode, sync::Arc};
 use tokio::{
     io::{self, AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader},
     task::spawn_blocking,
@@ -44,7 +45,16 @@ async fn cli_harness(config: &'static Config, fullscreen: bool) -> Result<Harnes
         } else {
             config
         };
-        Harness::new(config)
+        let mut harness = Harness::new(config)?;
+        let directories = config
+            .skills
+            .directories
+            .iter()
+            .map(|path| config.resolve_path(path));
+        if let Some(tool) = ActivateSkill::discover(directories)? {
+            harness.register_tool(Arc::new(tool))?;
+        }
+        Ok(harness)
     })
     .await
     .context("failed to start the CLI harness")??;

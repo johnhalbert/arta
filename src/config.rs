@@ -1,4 +1,4 @@
-use crate::{mcp::McpConfig, provider::llama_cpp::LlamaCPPOverrides};
+use crate::{mcp::McpConfig, provider::llama_cpp::LlamaCPPOverrides, skill::SkillConfig};
 use anyhow::{Context, Result};
 use clap::Parser;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -104,6 +104,7 @@ impl Args {
 pub struct Config {
     pub app: AppConfig,
     pub mcp: McpConfig,
+    pub skills: SkillConfig,
     providers: BTreeMap<String, toml::Table>,
     #[serde(skip)]
     directory: PathBuf,

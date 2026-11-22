@@ -22,3 +22,6 @@ gpu_layers = 0
 # url = "https://mcp.example.com/mcp"
 # bearer_token_env = "MCP_API_TOKEN"
 # tools = ["search"]
+
+# [skills]
+# directories = [".agents/skills"]

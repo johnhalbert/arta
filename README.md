@@ -60,6 +60,19 @@ The llama.cpp model needs an embedded chat template that supports tool calls. Ar
 
 Rust callers can implement `arta::tool::Tool` and use `Harness::register_tool` for in-process tools. Call `Harness::connect_mcp` to load configured MCP tools. Create sessions after registering tools so their agents receive the resulting tool set.
 
+## Use agent skills
+
+List skill directories in `config.toml`. Relative paths start from the configuration file's directory.
+
+```toml
+[skills]
+directories = [".agents/skills"]
+```
+
+Place each skill in its own subdirectory, such as `.agents/skills/review-notes/SKILL.md`. Each file starts with YAML front matter that provides `name` and `description`, followed by Markdown instructions. Use unique names across the configured directories.
+
+When Arta finds skills at startup, it advertises their names and descriptions in the `activate_skill` tool. When the model selects a skill by name, the tool returns the Markdown body. Skill activation uses a model with tool-call support, and the model can activate the skill again on later turns.
+
 ## One-shot input and output
 
 Use `--prompt -` to read UTF-8 text from standard input (`stdin`). `arta` writes the response to standard output (`stdout`). Use `--verbose` to see full llama.cpp diagnostics on standard error (`stderr`).
