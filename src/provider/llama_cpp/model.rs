@@ -1,7 +1,7 @@
-use crate::model::Model;
+use crate::{model::Model, provider::Turn};
 use anyhow::{Context, Result, ensure};
 use llama_cpp_4::{StringFromModelError, prelude::*};
-use serde_json::json;
+use serde_json::{Value, json};
 use std::{num::NonZeroU32, path::Path, sync::Arc};
 
 pub(super) struct LlamaCPPModel {
@@ -58,14 +58,24 @@ impl LlamaCPPModel {
         })
     }
 
-    pub(super) fn prepare_prompt(&self, prompt: &str) -> Result<(Vec<LlamaToken>, Vec<String>)> {
+    pub(super) fn prepare_prompt(
+        &self,
+        history: &[Turn],
+        prompt: &str,
+    ) -> Result<(Vec<LlamaToken>, Vec<String>)> {
         let add_bos = if self.inner.get_vocab().get_add_bos() {
             AddBos::Always
         } else {
             AddBos::Never
         };
         if let Some(templates) = &self.templates {
-            let messages = json!([{ "role": "user", "content": prompt }]);
+            let mut messages = Vec::with_capacity(history.len() * 2 + 1);
+            for turn in history {
+                messages.push(json!({ "role": "user", "content": turn.prompt }));
+                messages.push(json!({ "role": "assistant", "content": turn.reply }));
+            }
+            messages.push(json!({ "role": "user", "content": prompt }));
+            let messages = Value::Array(messages);
             let params = ChatApplyParams::new(messages.to_string()).with_enable_thinking(false);
             let chat = templates
                 .apply(&params)
@@ -78,6 +88,23 @@ impl LlamaCPPModel {
             return Ok((tokens, stops));
         }
 
+        let mut transcript;
+        let prompt = if history.is_empty() {
+            prompt
+        } else {
+            transcript = String::new();
+            for turn in history {
+                transcript.push_str("User: ");
+                transcript.push_str(&turn.prompt);
+                transcript.push_str("\nAssistant: ");
+                transcript.push_str(&turn.reply);
+                transcript.push('\n');
+            }
+            transcript.push_str("User: ");
+            transcript.push_str(prompt);
+            transcript.push_str("\nAssistant:");
+            &transcript
+        };
         let tokens = self
             .inner
             .str_to_token_with_special(prompt, add_bos, Special::Plaintext)

@@ -1,4 +1,8 @@
-use crate::{model::Model, provider::Provider, stream::Message};
+use crate::{
+    model::Model,
+    provider::{Provider, Turn},
+    stream::Message,
+};
 use anyhow::Result;
 use std::sync::Arc;
 
@@ -24,5 +28,10 @@ impl Agent {
     /// Run one independent prompt against the agent's model.
     pub async fn prompt(&self, prompt: &str) -> Result<Message> {
         self.provider.send(self.model.id(), prompt).await
+    }
+
+    /// Run a prompt with conversation history supplied by the caller.
+    pub async fn chat(&self, history: &[Turn], prompt: &str) -> Result<Message> {
+        self.provider.chat(self.model.id(), history, prompt).await
     }
 }

@@ -1,4 +1,20 @@
-use std::process::{Command, Stdio};
+use std::{
+    path::Path,
+    process::{Command, Stdio},
+};
+
+#[test]
+fn no_arguments_starts_repl_setup() {
+    let output = Command::new(env!("CARGO_BIN_EXE_arta"))
+        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests"))
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("failed to start the REPL"));
+}
 
 #[test]
 fn missing_prompt_reports_usage() {

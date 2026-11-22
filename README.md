@@ -1,6 +1,6 @@
 # arta
 
-`arta` uses llama.cpp to process one prompt with a model in a local GGUF file.
+`arta` uses llama.cpp to run one-shot prompts and interactive conversations with a model in a local GGUF file.
 
 ## Build and run on Windows
 
@@ -36,7 +36,21 @@ For llama.cpp, the existing flags override the config values for one run. A rela
 .\target\release\arta.exe --config config.toml --prompt "Hello" --max-tokens 32
 ```
 
-## Prompt input and output
+## Interactive conversations
+
+Set up `config.toml` in your working directory, then run `arta` with no arguments in your terminal.
+
+```powershell
+.\target\release\arta.exe
+```
+
+The full-screen view has two empty panes across the top and a conversation in the bottom half. Press Enter to send a prompt. A spinner appears below Arta's name until the reply starts streaming. Use Page Up and Page Down to read earlier turns, or Ctrl+End to return to the latest reply. Enter `/reset` to clear the conversation, or use `/exit` or Ctrl+C to quit.
+
+With redirected input or output, `arta` reads one prompt per line and writes replies to standard output. `/reset`, `/exit`, and end-of-input work in this mode.
+
+The current conversation counts toward the context limit. Use `/reset` to start a fresh conversation if the history fills the context.
+
+## One-shot input and output
 
 Use `--prompt -` to read UTF-8 text from standard input (`stdin`). `arta` writes the response to standard output (`stdout`). Use `--verbose` to see full llama.cpp diagnostics on standard error (`stderr`).
 
@@ -44,7 +58,7 @@ If the model has a chat template, `arta` passes the prompt as one user message. 
 
 ## Token limits
 
-- `--context-length` sets the total number of tokens available for the prompt and response. The default is 4096 tokens or the model's trained context length, whichever is lower.
+- `--context-length` sets the total number of tokens available for the prompt, conversation history, and response. In `config.toml`, use `context_length`. The default is 4096 tokens or the model's trained context length, whichever is lower.
 - `--max-tokens` sets the maximum number of tokens `arta` can generate. The default is 256 tokens.
 
 ## Use a GPU
@@ -56,3 +70,5 @@ If the model has a chat template, `arta` passes the prompt as one user message. 
 ```powershell
 cargo run --locked --release --features cuda --target-dir target/cuda -- --model .\gguf\Qwen3.5-4B-Q4_0.gguf --prompt "Hello" --gpu-layers 20
 ```
+
+For the full-screen interface, set `gpu_layers` in the selected model's `config.toml` entry, then run the CUDA executable with no arguments.

@@ -2,7 +2,7 @@ mod config;
 mod model;
 mod text;
 
-use super::{Provider, registry::ProviderRegistration};
+use super::{Provider, Turn, registry::ProviderRegistration};
 use crate::{config::Config, model::Model, stream::Message};
 use anyhow::{Context, Result, bail, ensure};
 pub use config::{LlamaCPPConfig, LlamaCPPModelConfig, LlamaCPPOverrides};
@@ -90,8 +90,18 @@ impl Provider for LlamaCPP {
     }
 
     fn send<'a>(&'a self, model_id: &'a str, prompt: &'a str) -> BoxFuture<'a, Result<Message>> {
+        self.chat(model_id, &[], prompt)
+    }
+
+    fn chat<'a>(
+        &'a self,
+        model_id: &'a str,
+        history: &'a [Turn],
+        prompt: &'a str,
+    ) -> BoxFuture<'a, Result<Message>> {
         Box::pin(async move {
             let model = Arc::clone(self.loaded_model(model_id)?);
+            let history = history.to_vec();
             let prompt = prompt.to_owned();
             let context_length = self.context_length;
             let max_tokens = self.max_tokens;
@@ -103,9 +113,14 @@ impl Provider for LlamaCPP {
                 if sender.is_closed() {
                     return Ok(());
                 }
-                let mut chunks = generate(&model, &prompt, context_length, max_tokens, || {
-                    sender.is_closed()
-                })?;
+                let mut chunks = generate(
+                    &model,
+                    &history,
+                    &prompt,
+                    context_length,
+                    max_tokens,
+                    || sender.is_closed(),
+                )?;
                 if ready.send(()).is_err() {
                     return Ok(());
                 }
@@ -142,6 +157,7 @@ impl Provider for LlamaCPP {
 
 fn generate(
     model: &LlamaCPPModel,
+    history: &[Turn],
     prompt: &str,
     context_length: Option<NonZeroU32>,
     max_tokens: NonZeroU32,
@@ -161,7 +177,7 @@ fn generate(
     );
 
     ensure!(!prompt.contains('\0'), "prompt contains a NUL character");
-    let (tokens, stops) = model.prepare_prompt(prompt)?;
+    let (tokens, stops) = model.prepare_prompt(history, prompt)?;
     ensure!(!tokens.is_empty(), "prompt produced no tokens");
     let context_capacity = context_length.get() as usize;
     ensure!(

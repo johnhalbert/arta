@@ -1,41 +1,79 @@
+mod repl;
+mod tui;
+
 use anyhow::{Context, Result, ensure};
 use arta::{
-    config::{self, StartupConfig},
+    config::{self, Config},
     harness::Harness,
     model::ModelId,
-    stream::{Frame, Message},
+    provider::llama_cpp::{LlamaCPP, LlamaCPPConfig},
+    stream::{Frame, Message, Stream},
 };
 use futures_util::{StreamExt, stream};
-use std::process::ExitCode;
+use std::{io::IsTerminal, process::ExitCode};
 use tokio::{
     io::{self, AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader},
     task::spawn_blocking,
 };
 
-async fn run(config: &'static StartupConfig) -> Result<()> {
-    let input = if config.prompt == "-" {
+async fn run_once(config: &'static Config, prompt: &str) -> Result<()> {
+    let input = if prompt == "-" {
         stdin_message(BufReader::new(io::stdin())).await?
     } else {
-        ensure!(!config.prompt.trim().is_empty(), "prompt cannot be empty");
-        Message::new(stream::iter([Ok(config.prompt.clone())]))
+        ensure!(!prompt.trim().is_empty(), "prompt cannot be empty");
+        Message::new(stream::iter([Ok(prompt.to_owned())]))
     };
 
-    let harness = spawn_blocking(move || -> Result<Harness> {
-        let mut harness = Harness::new(&config.settings)?;
+    let harness = cli_harness(config, false).await?;
+    let replies = harness
+        .session("cli")?
+        .stream("default", input.into_stream())?;
+    write_reply(replies, &mut io::stdout(), |_| {}).await
+}
+
+async fn cli_harness(config: &'static Config, fullscreen: bool) -> Result<Harness> {
+    spawn_blocking(move || -> Result<Harness> {
+        let mut quiet_config;
+        let config = if fullscreen {
+            // Native diagnostics would write over the alternate screen during inference.
+            let mut llama: LlamaCPPConfig = config.provider_settings(LlamaCPP::ID)?;
+            llama.verbose = false;
+            quiet_config = config.clone();
+            quiet_config.set_provider_settings(LlamaCPP::ID, llama)?;
+            &quiet_config
+        } else {
+            config
+        };
+        let mut harness = Harness::new(config)?;
         let model_id = ModelId {
-            provider: &config.settings.app.provider,
-            model: &config.settings.app.model,
+            provider: &config.app.provider,
+            model: &config.app.model,
         };
         harness.create_session("cli", &[("default", model_id)])?;
         Ok(harness)
     })
     .await
-    .context("failed to start the CLI session")??;
-    let mut replies = harness
-        .session("cli")?
-        .stream("default", input.into_stream())?;
+    .context("failed to start the CLI session")?
+}
 
-    let mut stdout = io::stdout();
+async fn run_conversation(config: &'static Config) -> Result<()> {
+    let fullscreen = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    let harness = cli_harness(config, fullscreen)
+        .await
+        .context("failed to start the REPL with the model selected in config.toml")?;
+    let mut repl = repl::Repl::new(harness.agent("cli", "default")?);
+    if fullscreen {
+        tui::run(&mut repl).await
+    } else {
+        repl.run_lines().await
+    }
+}
+
+async fn write_reply(
+    mut replies: Stream<'_>,
+    stdout: &mut io::Stdout,
+    mut capture: impl FnMut(&str),
+) -> Result<()> {
     let mut needs_newline = false;
     while let Some(frame) = replies.next().await {
         match frame? {
@@ -43,6 +81,7 @@ async fn run(config: &'static StartupConfig) -> Result<()> {
             Frame::Chunk(text) if !text.is_empty() => {
                 stdout.write_all(text.as_bytes()).await?;
                 stdout.flush().await?;
+                capture(&text);
                 needs_newline = !text.ends_with('\n');
             }
             Frame::End if needs_newline => stdout.write_all(b"\n").await?,
@@ -85,7 +124,11 @@ async fn main() -> ExitCode {
         Ok(config) => config,
         Err(error) => return report_error(error),
     };
-    match run(config).await {
+    let result = match config.prompt.as_deref() {
+        Some(prompt) => run_once(&config.settings, prompt).await,
+        None => run_conversation(&config.settings).await,
+    };
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => report_error(&error),
     }

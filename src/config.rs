@@ -11,11 +11,18 @@ use std::{
     sync::LazyLock,
 };
 
-static CONFIG: LazyLock<Result<StartupConfig>> = LazyLock::new(|| Args::parse().into_config());
+static CONFIG: LazyLock<Result<StartupConfig>> = LazyLock::new(|| {
+    let args = if std::env::args_os().len() == 1 {
+        Args::default()
+    } else {
+        Args::parse()
+    };
+    args.into_config()
+});
 
 pub struct StartupConfig {
     pub settings: Config,
-    pub prompt: String,
+    pub prompt: Option<String>,
 }
 
 /// Return the CLI configuration, initialized once from TOML and CLI arguments.
@@ -23,8 +30,12 @@ pub fn get() -> Result<&'static StartupConfig, &'static anyhow::Error> {
     CONFIG.as_ref()
 }
 
-#[derive(Parser, Debug)]
-#[command(version, about = "Run a single prompt against a local GGUF model")]
+#[derive(Default, Parser, Debug)]
+#[command(
+    version,
+    about = "Run a prompt against a local GGUF model or start a conversation",
+    after_help = "Run arta with no arguments to open the terminal UI using config.toml."
+)]
 struct Args {
     /// Path to a TOML configuration file (defaults to config.toml when present).
     #[arg(long, value_name = "PATH")]
@@ -43,8 +54,8 @@ struct Args {
     model: Option<PathBuf>,
 
     /// Prompt text. Use - to read UTF-8 text from stdin.
-    #[arg(short, long, value_name = "TEXT")]
-    prompt: String,
+    #[arg(short, long, value_name = "TEXT", required = true)]
+    prompt: Option<String>,
 
     /// Total token budget for the prompt and response (defaults to 4096 or the model's limit, whichever is lower).
     #[arg(short, long, value_name = "TOKENS")]
@@ -88,7 +99,7 @@ impl Args {
     }
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub app: AppConfig,
@@ -97,7 +108,7 @@ pub struct Config {
     directory: PathBuf,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AppConfig {
     pub provider: String,
@@ -190,7 +201,7 @@ mod tests {
         ])?
         .into_config()?;
 
-        assert_eq!(startup.prompt, "Hello");
+        assert_eq!(startup.prompt.as_deref(), Some("Hello"));
         assert_eq!(startup.settings.app.model, "one-off");
         let provider: LlamaCPPConfig = startup.settings.provider_settings(LlamaCPP::ID)?;
         assert_eq!(provider.max_tokens.get(), 32);
