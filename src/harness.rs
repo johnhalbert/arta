@@ -1,5 +1,5 @@
 use crate::{
-    agent::Agent,
+    agent::{Agent, AgentOptions},
     config::Config,
     model::{Model, ModelId},
     provider::{Provider, registry::ProviderRegistry, tool},
@@ -83,11 +83,21 @@ impl Harness {
 
     /// Connect the configured MCP servers and register their tools for new sessions.
     pub async fn connect_mcp(&mut self, config: &Config) -> Result<()> {
+        self.connect_mcp_in(config, None).await
+    }
+
+    /// Connect MCP servers with a workspace as the working directory of local processes.
+    pub async fn connect_mcp_in(
+        &mut self,
+        config: &Config,
+        workspace: Option<&Path>,
+    ) -> Result<()> {
         if !config.mcp.servers.is_empty() {
             let mut tools = (*self.tools).clone();
+            let directory = config.resolve_path(Path::new("."));
             config
                 .mcp
-                .register(&config.resolve_path(Path::new(".")), &mut tools)
+                .register(&directory, workspace.unwrap_or(&directory), &mut tools)
                 .await?;
             self.tools = Arc::new(tools);
         }
@@ -100,6 +110,20 @@ impl Harness {
         session_id: &str,
         agents: &[(&str, ModelId<'_>)],
     ) -> Result<()> {
+        self.create_session_with_agents(
+            session_id,
+            agents
+                .iter()
+                .map(|&(name, model)| (name, model, AgentOptions::default())),
+        )
+    }
+
+    /// Create a session with a model and options for each named agent.
+    pub fn create_session_with_agents<'a>(
+        &mut self,
+        session_id: &str,
+        agents: impl IntoIterator<Item = (&'a str, ModelId<'a>, AgentOptions<'a>)>,
+    ) -> Result<()> {
         ensure!(
             !session_id.trim().is_empty(),
             "session identifier cannot be empty"
@@ -108,12 +132,13 @@ impl Harness {
             !self.sessions.contains_key(session_id),
             "session '{session_id}' is already registered"
         );
-        let session = Session::new(agents, |model| {
+        let session = Session::new(agents, |model, options| {
             let provider = self.provider_handle(model.provider)?;
             Ok(Agent::new(
                 Arc::clone(provider),
                 provider.model(model.model)?,
                 Arc::clone(&self.tools),
+                options,
             ))
         })?;
         self.sessions.insert(session_id.to_owned(), session);

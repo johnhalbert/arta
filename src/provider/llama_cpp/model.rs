@@ -60,10 +60,12 @@ impl LlamaCPPModel {
 
     pub(super) fn prepare_prompt(
         &self,
+        system_prompt: Option<&str>,
         history: &[Turn],
         prompt: &str,
     ) -> Result<(Vec<LlamaToken>, Vec<String>)> {
-        self.template.prepare_prompt(&self.inner, history, prompt)
+        self.template
+            .prepare_prompt(&self.inner, system_prompt, history, prompt)
     }
 
     pub(super) fn new_context(&self, context_length: NonZeroU32) -> Result<LlamaContext<'_>> {
@@ -90,12 +92,42 @@ impl Model for LlamaCPPModel {
     }
 }
 
-pub(super) fn chat_messages(history: &[Turn], prompt: &str) -> Vec<Value> {
-    let mut messages = Vec::with_capacity(history.len() * 2 + 1);
+pub(super) fn chat_messages(
+    system_prompt: Option<&str>,
+    history: &[Turn],
+    prompt: &str,
+) -> Vec<Value> {
+    let mut messages =
+        Vec::with_capacity(history.len() * 2 + 1 + usize::from(system_prompt.is_some()));
+    if let Some(content) = system_prompt {
+        messages.push(json!({ "role": "system", "content": content }));
+    }
     for turn in history {
         messages.push(json!({ "role": "user", "content": turn.prompt }));
         messages.push(json!({ "role": "assistant", "content": turn.reply }));
     }
     messages.push(json!({ "role": "user", "content": prompt }));
     messages
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn system_prompt_precedes_the_history_and_new_turn() {
+        let history = [Turn {
+            prompt: "First question".into(),
+            reply: "First answer".into(),
+        }];
+        assert_eq!(
+            chat_messages(Some("Use short answers.\n"), &history, "Next question"),
+            vec![
+                json!({"role": "system", "content": "Use short answers.\n"}),
+                json!({"role": "user", "content": "First question"}),
+                json!({"role": "assistant", "content": "First answer"}),
+                json!({"role": "user", "content": "Next question"}),
+            ]
+        );
+    }
 }

@@ -9,6 +9,7 @@ use futures_util::{future::BoxFuture, stream};
 /// The current inference turn, including tool exchanges that have already completed.
 pub struct ToolRequest<'a> {
     pub model_id: &'a str,
+    pub system_prompt: Option<&'a str>,
     pub history: &'a [Turn],
     pub prompt: &'a str,
     pub tools: &'a [&'a ToolSpec],
@@ -50,18 +51,21 @@ pub(crate) async fn send(
     if tools.is_empty() {
         return provider.send(model_id, prompt).await;
     }
-    chat(provider, model_id, &[], prompt, tools).await
+    chat(provider, model_id, None, &[], prompt, tools).await
 }
 
 pub(crate) async fn chat(
     provider: &dyn Provider,
     model_id: &str,
+    system_prompt: Option<&str>,
     history: &[Turn],
     prompt: &str,
     tools: &Tools,
 ) -> Result<Message> {
     if tools.is_empty() {
-        return provider.chat(model_id, history, prompt).await;
+        return provider
+            .chat_with_system(model_id, system_prompt, history, prompt)
+            .await;
     }
     let specs = tools.specs();
     let adapter = provider
@@ -75,6 +79,7 @@ pub(crate) async fn chat(
         let response = adapter
             .infer(ToolRequest {
                 model_id,
+                system_prompt,
                 history,
                 prompt,
                 tools: &specs,

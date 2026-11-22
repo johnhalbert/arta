@@ -37,7 +37,9 @@ pub struct LlamaCPPModelConfig {
     pub gpu_layers: u32,
 }
 
-/// Optional overrides for the llama.cpp flags on the one-shot CLI.
+/// Optional overrides for the selected llama.cpp model and its inference settings.
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct LlamaCPPOverrides {
     pub model_path: Option<PathBuf>,
     pub context_length: Option<NonZeroU32>,
@@ -59,7 +61,7 @@ impl LlamaCPPOverrides {
 
         ensure!(
             config.app.provider == LlamaCPP::ID,
-            "llama.cpp flags require the '{}' provider",
+            "llama.cpp overrides require the '{}' provider",
             LlamaCPP::ID
         );
         let mut settings: LlamaCPPConfig = config.provider_settings(LlamaCPP::ID)?;

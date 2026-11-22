@@ -1,4 +1,7 @@
+mod agent;
+
 use crate::{mcp::McpConfig, provider::llama_cpp::LlamaCPPOverrides, skill::SkillConfig};
+pub use agent::AgentProfile;
 use anyhow::{Context, Result};
 use clap::Parser;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -23,6 +26,13 @@ static CONFIG: LazyLock<Result<StartupConfig>> = LazyLock::new(|| {
 pub struct StartupConfig {
     pub settings: Config,
     pub prompt: Option<String>,
+    pub agent: Option<AgentProfile>,
+}
+
+impl StartupConfig {
+    pub fn agent_name(&self) -> &str {
+        self.agent.as_ref().map_or("default", AgentProfile::name)
+    }
 }
 
 /// Return the CLI configuration, initialized once from TOML and CLI arguments.
@@ -41,6 +51,10 @@ struct Args {
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
 
+    /// Run the named agent from ~/.arta/agents/NAME.md.
+    #[arg(long, value_name = "NAME")]
+    agent: Option<String>,
+
     /// Override the provider selected in the configuration.
     #[arg(long, value_name = "ID")]
     provider: Option<String>,
@@ -54,7 +68,7 @@ struct Args {
     model: Option<PathBuf>,
 
     /// Prompt text. Use - to read UTF-8 text from stdin.
-    #[arg(short, long, value_name = "TEXT", required = true)]
+    #[arg(short, long, value_name = "TEXT", required_unless_present = "agent")]
     prompt: Option<String>,
 
     /// Total token budget for the prompt and response (defaults to 4096 or the model's limit, whichever is lower).
@@ -77,6 +91,11 @@ struct Args {
 impl Args {
     fn into_config(self) -> Result<StartupConfig> {
         let mut settings = Config::load(self.config.as_deref())?;
+        let agent = self
+            .agent
+            .as_deref()
+            .map(|name| AgentProfile::load(name, &mut settings))
+            .transpose()?;
         if let Some(provider) = self.provider {
             settings.app.provider = provider;
         }
@@ -95,6 +114,7 @@ impl Args {
         Ok(StartupConfig {
             settings,
             prompt: self.prompt,
+            agent,
         })
     }
 }

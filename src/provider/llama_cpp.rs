@@ -107,10 +107,21 @@ impl Provider for LlamaCPP {
         history: &'a [Turn],
         prompt: &'a str,
     ) -> BoxFuture<'a, Result<Message>> {
+        self.chat_with_system(model_id, None, history, prompt)
+    }
+
+    fn chat_with_system<'a>(
+        &'a self,
+        model_id: &'a str,
+        system_prompt: Option<&'a str>,
+        history: &'a [Turn],
+        prompt: &'a str,
+    ) -> BoxFuture<'a, Result<Message>> {
         Box::pin(async move {
             let model = Arc::clone(self.loaded_model(model_id)?);
             let history = history.to_vec();
             let prompt = prompt.to_owned();
+            let system_prompt = system_prompt.map(str::to_owned);
             let context_length = self.context_length;
             let max_tokens = self.max_tokens;
             let runtime =
@@ -122,7 +133,8 @@ impl Provider for LlamaCPP {
                     return Ok(());
                 }
                 ensure!(!prompt.contains('\0'), "prompt contains a NUL character");
-                let (tokens, stops) = model.prepare_prompt(&history, &prompt)?;
+                let (tokens, stops) =
+                    model.prepare_prompt(system_prompt.as_deref(), &history, &prompt)?;
                 let pieces = generate(
                     &model,
                     tokens,

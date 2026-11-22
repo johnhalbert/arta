@@ -29,10 +29,15 @@ pub struct McpConfig {
 }
 
 impl McpConfig {
-    pub(crate) async fn register(&self, directory: &Path, tools: &mut Tools) -> Result<()> {
+    pub(crate) async fn register(
+        &self,
+        directory: &Path,
+        workspace: &Path,
+        tools: &mut Tools,
+    ) -> Result<()> {
         for (name, server) in &self.servers {
             let discovered = server
-                .connect(name, directory)
+                .connect_in(name, directory, workspace)
                 .await
                 .with_context(|| format!("failed to connect to MCP server '{name}'"))?;
             for tool in discovered {
@@ -68,6 +73,15 @@ type Connection = RunningService<RoleClient, ClientConfig>;
 impl McpServerConfig {
     /// Connect to a server, discover tools, and expose them with a server name prefix.
     pub async fn connect(&self, name: &str, directory: &Path) -> Result<Vec<Arc<dyn Tool>>> {
+        self.connect_in(name, directory, directory).await
+    }
+
+    async fn connect_in(
+        &self,
+        name: &str,
+        directory: &Path,
+        workspace: &Path,
+    ) -> Result<Vec<Arc<dyn Tool>>> {
         ensure!(
             !name.is_empty()
                 && name
@@ -75,12 +89,17 @@ impl McpServerConfig {
                     .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')),
             "invalid MCP server name '{name}'"
         );
-        timeout(CONNECT_TIMEOUT, self.discover(name, directory))
+        timeout(CONNECT_TIMEOUT, self.discover(name, directory, workspace))
             .await
             .context("MCP connection or tool discovery timed out")?
     }
 
-    async fn discover(&self, name: &str, directory: &Path) -> Result<Vec<Arc<dyn Tool>>> {
+    async fn discover(
+        &self,
+        name: &str,
+        directory: &Path,
+        workspace: &Path,
+    ) -> Result<Vec<Arc<dyn Tool>>> {
         let client = ClientConfig::new(
             Default::default(),
             Implementation::new("arta", env!("CARGO_PKG_VERSION")),
@@ -106,7 +125,7 @@ impl McpServerConfig {
                 command
                     .args(args)
                     .envs(env)
-                    .current_dir(directory)
+                    .current_dir(std::path::absolute(workspace)?)
                     .kill_on_drop(true);
                 let (transport, _) = TokioChildProcess::builder(command)
                     .stderr(Stdio::null())

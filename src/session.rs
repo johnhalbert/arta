@@ -1,5 +1,5 @@
 use crate::{
-    agent::Agent,
+    agent::{Agent, AgentOptions},
     model::ModelId,
     stream::{Frame, Stream},
 };
@@ -13,29 +13,26 @@ pub struct Session {
 }
 
 impl Session {
-    pub(crate) fn new(
-        bindings: &[(&str, ModelId<'_>)],
-        bind: impl Fn(ModelId<'_>) -> Result<Agent>,
+    pub(crate) fn new<'a>(
+        bindings: impl IntoIterator<Item = (&'a str, ModelId<'a>, AgentOptions<'a>)>,
+        bind: impl Fn(ModelId<'a>, AgentOptions<'a>) -> Result<Agent>,
     ) -> Result<Self> {
-        ensure!(
-            !bindings.is_empty(),
-            "a session must have at least one agent"
-        );
-        let mut agents = HashMap::with_capacity(bindings.len());
-        for &(agent_id, model) in bindings {
+        let mut agents = HashMap::new();
+        for (agent_id, model, options) in bindings {
             ensure!(
                 !agent_id.trim().is_empty(),
                 "agent identifier cannot be empty"
             );
             match agents.entry(agent_id.to_owned()) {
                 Entry::Vacant(entry) => {
-                    entry.insert(bind(model)?);
+                    entry.insert(bind(model, options)?);
                 }
                 Entry::Occupied(_) => {
                     bail!("agent '{agent_id}' is already registered in this session")
                 }
             }
         }
+        ensure!(!agents.is_empty(), "a session must have at least one agent");
         Ok(Self { agents })
     }
 

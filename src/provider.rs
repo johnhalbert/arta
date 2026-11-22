@@ -37,4 +37,18 @@ pub trait Provider: Send + Sync {
         }
         Box::pin(async { bail!("this provider does not support multi-turn conversations") })
     }
+
+    /// Reply with an optional system prompt that precedes the conversation.
+    fn chat_with_system<'a>(
+        &'a self,
+        model_id: &'a str,
+        system_prompt: Option<&'a str>,
+        history: &'a [Turn],
+        prompt: &'a str,
+    ) -> BoxFuture<'a, Result<Message>> {
+        if system_prompt.is_none() {
+            return self.chat(model_id, history, prompt);
+        }
+        Box::pin(async { bail!("this provider does not support system prompts") })
+    }
 }

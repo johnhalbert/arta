@@ -3,7 +3,7 @@ mod tui;
 
 use anyhow::{Context, Result, ensure};
 use arta::{
-    config::{self, Config},
+    config::{self, AgentProfile, StartupConfig},
     harness::Harness,
     model::ModelId,
     provider::llama_cpp::{LlamaCPP, LlamaCPPConfig},
@@ -17,7 +17,7 @@ use tokio::{
     task::spawn_blocking,
 };
 
-async fn run_once(config: &'static Config, prompt: &str) -> Result<()> {
+async fn run_once(startup: &'static StartupConfig, prompt: &str) -> Result<()> {
     let input = if prompt == "-" {
         stdin_message(BufReader::new(io::stdin())).await?
     } else {
@@ -25,14 +25,15 @@ async fn run_once(config: &'static Config, prompt: &str) -> Result<()> {
         Message::new(stream::iter([Ok(prompt.to_owned())]))
     };
 
-    let harness = cli_harness(config, false).await?;
+    let harness = cli_harness(startup, false).await?;
     let replies = harness
         .session("cli")?
-        .stream("default", input.into_stream())?;
+        .stream(startup.agent_name(), input.into_stream())?;
     write_reply(replies, &mut io::stdout(), |_| {}).await
 }
 
-async fn cli_harness(config: &'static Config, fullscreen: bool) -> Result<Harness> {
+async fn cli_harness(startup: &'static StartupConfig, fullscreen: bool) -> Result<Harness> {
+    let config = &startup.settings;
     let mut harness = spawn_blocking(move || -> Result<Harness> {
         let mut quiet_config;
         let config = if fullscreen {
@@ -58,21 +59,26 @@ async fn cli_harness(config: &'static Config, fullscreen: bool) -> Result<Harnes
     })
     .await
     .context("failed to start the CLI harness")??;
-    harness.connect_mcp(config).await?;
+    let options = startup
+        .agent
+        .as_ref()
+        .map(AgentProfile::options)
+        .unwrap_or_default();
+    harness.connect_mcp_in(config, options.workspace).await?;
     let model_id = ModelId {
         provider: &config.app.provider,
         model: &config.app.model,
     };
-    harness.create_session("cli", &[("default", model_id)])?;
+    harness.create_session_with_agents("cli", [(startup.agent_name(), model_id, options)])?;
     Ok(harness)
 }
 
-async fn run_conversation(config: &'static Config) -> Result<()> {
+async fn run_conversation(startup: &'static StartupConfig) -> Result<()> {
     let fullscreen = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
-    let harness = cli_harness(config, fullscreen)
+    let harness = cli_harness(startup, fullscreen)
         .await
-        .context("failed to start the REPL with the model selected in config.toml")?;
-    let mut repl = repl::Repl::new(harness.agent("cli", "default")?);
+        .context("failed to start the REPL")?;
+    let mut repl = repl::Repl::new(harness.agent("cli", startup.agent_name())?);
     if fullscreen {
         tui::run(&mut repl).await
     } else {
@@ -136,8 +142,8 @@ async fn main() -> ExitCode {
         Err(error) => return report_error(error),
     };
     let result = match config.prompt.as_deref() {
-        Some(prompt) => run_once(&config.settings, prompt).await,
-        None => run_conversation(&config.settings).await,
+        Some(prompt) => run_once(config, prompt).await,
+        None => run_conversation(config).await,
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

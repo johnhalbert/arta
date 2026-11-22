@@ -39,9 +39,14 @@ impl ModelTemplate {
     pub(super) fn prepare_prompt(
         &self,
         model: &LlamaModel,
+        system_prompt: Option<&str>,
         history: &[Turn],
         prompt: &str,
     ) -> Result<(Vec<LlamaToken>, Vec<String>)> {
+        ensure!(
+            !system_prompt.is_some_and(|prompt| prompt.contains('\0')),
+            "system prompt contains a NUL character"
+        );
         let add_bos = if model.get_vocab().get_add_bos() {
             AddBos::Always
         } else {
@@ -49,7 +54,7 @@ impl ModelTemplate {
         };
 
         if let Self::Embedded(templates) = self {
-            let messages = chat_messages(history, prompt);
+            let messages = chat_messages(system_prompt, history, prompt);
             let params = ChatApplyParams::new(Value::Array(messages).to_string())
                 .with_enable_thinking(false);
             let chat = templates
@@ -64,10 +69,15 @@ impl ModelTemplate {
         }
 
         let mut transcript;
-        let prompt = if history.is_empty() {
+        let prompt = if history.is_empty() && system_prompt.is_none() {
             prompt
         } else {
             transcript = String::new();
+            if let Some(system_prompt) = system_prompt {
+                transcript.push_str("System: ");
+                transcript.push_str(system_prompt);
+                transcript.push_str("\n\n");
+            }
             for turn in history {
                 transcript.push_str("User: ");
                 transcript.push_str(&turn.prompt);

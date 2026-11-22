@@ -50,9 +50,31 @@ With redirected input or output, `arta` reads one prompt per line and writes rep
 
 The current conversation counts toward the context limit. Use `/reset` to start a fresh conversation if the history fills the context.
 
+## Define an agent
+
+Save the following as `~/.arta/agents/reviewer.md`. Create the `review` workspace directory or point `workspace` to an existing directory. The filename without `.md` is the agent name. Use letters, digits, underscores, or hyphens in the name.
+
+```markdown
+---
+provider: llama.cpp
+model: local
+workspace: ~/workspaces/review
+config:
+  context_length: 4096
+  max_tokens: 512
+---
+Review changes for correctness. Cite the file and line for each finding.
+```
+
+Run `arta --agent reviewer` for an interactive conversation or `arta --agent reviewer --prompt "Review this change"` for one reply. The Markdown body supplies the system prompt on every turn, including after `/reset` and during tool calls. If the chat template lacks a system role, llama.cpp folds the instructions into the first user message. For GGUF files without a chat template, Arta adds the instructions to the beginning of the plain-text transcript.
+
+The agent's `provider`, `model`, and optional `config` override the corresponding settings from `config.toml`. For llama.cpp, `config` accepts `model_path`, `context_length`, `max_tokens`, `gpu_layers`, and `verbose`. Set `model_path` to use a GGUF directly. Otherwise, `model` selects a model already registered in TOML. CLI flags take precedence over the agent settings.
+
+Relative `workspace` and `model_path` values start from the Markdown file's directory. Both also accept absolute paths and `~/` paths. The workspace is the working directory of local MCP server processes. Model paths, skill directories, and MCP executable paths set in TOML keep their config-relative resolution.
+
 ## Use tools during inference
 
-Configure MCP servers under `[mcp.servers]` to make their tools available in one-shot prompts and interactive conversations. For a local stdio server, set `command` and optional `args` and `env`. The process starts in the config file's directory. For a Streamable HTTP server, set `url` and optionally set `bearer_token_env` to the name of an environment variable containing its bearer token. See `config.example.toml` for both forms.
+Configure MCP servers under `[mcp.servers]` to make their tools available in one-shot prompts and interactive conversations. For a local stdio server, set `command` and optional `args` and `env`. The process starts in the selected agent's workspace or defaults to the config file's directory. For a Streamable HTTP server, set `url` and optionally set `bearer_token_env` to the name of an environment variable containing its bearer token. See `config.example.toml` for both forms.
 
 Arta discovers tools at startup and exposes them as `server__tool` names, with periods replaced by underscores. Set `tools` on a server to list the original names to expose. Omitting it exposes every tool the server advertises. The model can invoke exposed tools automatically, so configure servers and tools you trust to run.
 

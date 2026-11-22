@@ -1,4 +1,7 @@
-use crate::tool::{Tool, ToolArguments, ToolOutput, ToolSpec};
+use crate::{
+    front_matter,
+    tool::{Tool, ToolArguments, ToolOutput, ToolSpec},
+};
 use anyhow::{Context, Result, bail, ensure};
 use futures_util::future::BoxFuture;
 use serde::Deserialize;
@@ -110,36 +113,23 @@ impl Tool for ActivateSkill {
 }
 
 fn parse(source: &str) -> Result<(FrontMatter, &str)> {
-    let source = source.strip_prefix('\u{feff}').unwrap_or(source);
-    let source = source
-        .strip_prefix("---\n")
-        .or_else(|| source.strip_prefix("---\r\n"))
-        .context("expected YAML front matter beginning with '---'")?;
-    let mut offset = 0;
-    for line in source.split_inclusive('\n') {
-        if line.trim_end_matches(['\r', '\n']) == "---" {
-            let metadata: FrontMatter =
-                serde_saphyr::from_str(&source[..offset]).context("invalid YAML front matter")?;
-            let name = &metadata.name;
-            ensure!(
-                (1..=64).contains(&name.len())
-                    && name.bytes().all(|byte| byte.is_ascii_lowercase()
-                        || byte.is_ascii_digit()
-                        || byte == b'-')
-                    && !name.starts_with('-')
-                    && !name.ends_with('-')
-                    && !name.contains("--"),
-                "invalid skill name '{name}'"
-            );
-            ensure!(
-                !metadata.description.trim().is_empty(),
-                "skill description is empty"
-            );
-            return Ok((metadata, &source[offset + line.len()..]));
-        }
-        offset += line.len();
-    }
-    bail!("missing closing '---' for YAML front matter")
+    let (metadata, body): (FrontMatter, _) = front_matter::parse(source)?;
+    let name = &metadata.name;
+    ensure!(
+        (1..=64).contains(&name.len())
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+            && !name.starts_with('-')
+            && !name.ends_with('-')
+            && !name.contains("--"),
+        "invalid skill name '{name}'"
+    );
+    ensure!(
+        !metadata.description.trim().is_empty(),
+        "skill description is empty"
+    );
+    Ok((metadata, body))
 }
 
 #[cfg(test)]

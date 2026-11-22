@@ -1,5 +1,6 @@
 use anyhow::{Result, bail};
 use arta::{
+    agent::AgentOptions,
     config::Config,
     harness::Harness,
     model::{Model, ModelId},
@@ -44,6 +45,7 @@ impl ToolAdapter for ToolProvider {
     fn infer<'a>(&'a self, request: ToolRequest<'a>) -> BoxFuture<'a, Result<ToolResponse>> {
         Box::pin(async move {
             assert_eq!(request.model_id, "test");
+            assert_eq!(request.system_prompt, Some("Answer using the lookup tool."));
             assert_eq!(request.tools.len(), 1);
             assert_eq!(request.tools[0].name, "lookup");
             if let Some(exchange) = request.exchanges.last() {
@@ -95,13 +97,17 @@ async fn an_agent_runs_a_tool_and_returns_the_follow_up_reply() -> Result<()> {
             "required": ["key"]
         }))?,
     })))?;
-    harness.create_session(
+    harness.create_session_with_agents(
         "chat",
-        &[(
+        [(
             "agent",
             ModelId {
                 provider: "test",
                 model: "test",
+            },
+            AgentOptions {
+                system_prompt: Some("Answer using the lookup tool."),
+                ..Default::default()
             },
         )],
     )?;

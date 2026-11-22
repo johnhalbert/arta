@@ -112,3 +112,83 @@ impl<'a> Repl<'a> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arta::{
+        agent::AgentOptions,
+        config::Config,
+        harness::Harness,
+        model::{Model, ModelId},
+        provider::Provider,
+        stream::Frame,
+    };
+    use futures_util::future::BoxFuture;
+    use std::sync::Arc;
+
+    struct TestProvider;
+
+    impl Model for TestProvider {
+        fn id(&self) -> &str {
+            "test"
+        }
+
+        fn trained_context_length(&self) -> u32 {
+            4096
+        }
+    }
+
+    impl Provider for TestProvider {
+        fn model(&self, _: &str) -> Result<Arc<dyn Model>> {
+            Ok(Arc::new(Self))
+        }
+
+        fn send<'a>(&'a self, _: &'a str, _: &'a str) -> BoxFuture<'a, Result<Message>> {
+            Box::pin(async { anyhow::bail!("expected the agent's system prompt") })
+        }
+
+        fn chat_with_system<'a>(
+            &'a self,
+            _: &'a str,
+            system_prompt: Option<&'a str>,
+            history: &'a [Turn],
+            _: &'a str,
+        ) -> BoxFuture<'a, Result<Message>> {
+            assert_eq!(system_prompt, Some("Use short answers."));
+            let reply = history.len().to_string();
+            Box::pin(async { Ok(Message::new(stream::iter([Ok(reply)]))) })
+        }
+    }
+
+    #[tokio::test]
+    async fn reset_clears_history_and_keeps_the_system_prompt() -> Result<()> {
+        let mut harness = Harness::new(&Config::default())?;
+        harness.register_provider("test", || Ok(Arc::new(TestProvider)))?;
+        harness.create_session_with_agents(
+            "cli",
+            [(
+                "reviewer",
+                ModelId {
+                    provider: "test",
+                    model: "test",
+                },
+                AgentOptions {
+                    system_prompt: Some("Use short answers."),
+                    ..Default::default()
+                },
+            )],
+        )?;
+        let mut repl = Repl::new(harness.agent("cli", "reviewer")?);
+        repl.complete(Turn {
+            prompt: "Hello".into(),
+            reply: "Hi".into(),
+        });
+        assert!(matches!(repl.submit("/reset".into()), Action::Reset));
+        assert_eq!(
+            repl.reply("Hello again").try_collect::<Vec<_>>().await?,
+            vec![Frame::Begin, Frame::Chunk("0".into()), Frame::End]
+        );
+        Ok(())
+    }
+}

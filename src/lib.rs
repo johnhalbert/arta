@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod config;
+mod front_matter;
 pub mod harness;
 pub mod mcp;
 pub mod model;

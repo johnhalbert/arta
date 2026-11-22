@@ -15,6 +15,12 @@ impl ToolAdapter for LlamaCPP {
                 !request.prompt.contains('\0'),
                 "prompt contains a NUL character"
             );
+            ensure!(
+                !request
+                    .system_prompt
+                    .is_some_and(|prompt| prompt.contains('\0')),
+                "system prompt contains a NUL character"
+            );
             let model = Arc::clone(self.loaded_model(request.model_id)?);
             let params = tool_prompt(&request);
             let context_length = self.context_length;
@@ -70,7 +76,7 @@ impl ToolAdapter for LlamaCPP {
 }
 
 fn tool_prompt(request: &ToolRequest<'_>) -> ChatApplyParams {
-    let mut messages = chat_messages(request.history, request.prompt);
+    let mut messages = chat_messages(request.system_prompt, request.history, request.prompt);
     for exchange in request.exchanges {
         let calls: Vec<_> = exchange
             .calls

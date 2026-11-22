@@ -29,6 +29,18 @@ fn missing_prompt_reports_usage() {
 }
 
 #[test]
+fn agent_selection_allows_interactive_startup_and_rejects_paths() {
+    let output = Command::new(env!("CARGO_BIN_EXE_arta"))
+        .args(["--agent", "../reviewer"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("invalid agent name"));
+}
+
+#[test]
 fn empty_stdin_is_rejected_before_opening_model() {
     let output = Command::new(env!("CARGO_BIN_EXE_arta"))
         .args(["--model", "unused.gguf", "--prompt", "-"])
