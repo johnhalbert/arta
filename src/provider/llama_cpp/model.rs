@@ -1,12 +1,17 @@
+mod template;
+
 use crate::{model::Model, provider::Turn};
 use anyhow::{Context, Result, ensure};
-use llama_cpp_4::{StringFromModelError, prelude::*};
-use serde_json::{Value, json};
+use llama_cpp_4::prelude::{
+    LlamaBackend, LlamaContext, LlamaContextParams, LlamaModel, LlamaModelParams, LlamaToken,
+    supports_gpu_offload,
+};
 use std::{num::NonZeroU32, path::Path, sync::Arc};
+use template::ModelTemplate;
 
 pub(super) struct LlamaCPPModel {
     id: Arc<str>,
-    templates: Option<ChatTemplates>,
+    template: ModelTemplate,
     pub(super) inner: LlamaModel,
     // Keep the backend alive until after the native model drops.
     backend: Arc<LlamaBackend>,
@@ -42,17 +47,11 @@ impl LlamaCPPModel {
             path.display()
         );
 
-        let templates = match inner.chat_template(None) {
-            Ok(template) if !template.is_empty() => Some(
-                ChatTemplates::from_model(&inner, None).context("invalid model chat template")?,
-            ),
-            Ok(_) | Err(StringFromModelError::ReturnedError(-1)) => None,
-            Err(error) => return Err(error).context("failed to read model chat template"),
-        };
+        let template = ModelTemplate::from_model(&inner)?;
 
         Ok(Self {
             id,
-            templates,
+            template,
             inner,
             backend,
         })
@@ -63,53 +62,7 @@ impl LlamaCPPModel {
         history: &[Turn],
         prompt: &str,
     ) -> Result<(Vec<LlamaToken>, Vec<String>)> {
-        let add_bos = if self.inner.get_vocab().get_add_bos() {
-            AddBos::Always
-        } else {
-            AddBos::Never
-        };
-        if let Some(templates) = &self.templates {
-            let mut messages = Vec::with_capacity(history.len() * 2 + 1);
-            for turn in history {
-                messages.push(json!({ "role": "user", "content": turn.prompt }));
-                messages.push(json!({ "role": "assistant", "content": turn.reply }));
-            }
-            messages.push(json!({ "role": "user", "content": prompt }));
-            let messages = Value::Array(messages);
-            let params = ChatApplyParams::new(messages.to_string()).with_enable_thinking(false);
-            let chat = templates
-                .apply(&params)
-                .context("failed to format prompt")?;
-            let tokens = chat
-                .tokenize_prompt(&self.inner, add_bos)
-                .context("failed to tokenize chat prompt")?;
-            let stops = serde_json::from_str(&chat.additional_stops_json)
-                .context("failed to read chat template stop strings")?;
-            return Ok((tokens, stops));
-        }
-
-        let mut transcript;
-        let prompt = if history.is_empty() {
-            prompt
-        } else {
-            transcript = String::new();
-            for turn in history {
-                transcript.push_str("User: ");
-                transcript.push_str(&turn.prompt);
-                transcript.push_str("\nAssistant: ");
-                transcript.push_str(&turn.reply);
-                transcript.push('\n');
-            }
-            transcript.push_str("User: ");
-            transcript.push_str(prompt);
-            transcript.push_str("\nAssistant:");
-            &transcript
-        };
-        let tokens = self
-            .inner
-            .str_to_token_with_special(prompt, add_bos, Special::Plaintext)
-            .context("failed to tokenize prompt")?;
-        Ok((tokens, Vec::new()))
+        self.template.prepare_prompt(&self.inner, history, prompt)
     }
 
     pub(super) fn new_context(&self, context_length: NonZeroU32) -> Result<LlamaContext<'_>> {
