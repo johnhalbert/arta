@@ -105,7 +105,7 @@ impl ActivateSkill {
         }
 
         let mut description = String::from(
-            "Load a skill's instructions. When a task matches a skill below, call this tool with its name before proceeding.\n\nAvailable skills:\n",
+            "The activate_skill tool loads a skill's instructions by name. When asked which tools you can call, list activate_skill as a tool. When asked which skills are available, answer directly from the catalog below. Call activate_skill with the matching skill name before performing a task that needs its instructions.\n\nAvailable skills:\n",
         );
         for (name, skill) in &skills {
             writeln!(description, "- {name}: {}", skill.description.trim())?;
