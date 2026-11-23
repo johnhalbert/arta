@@ -1,3 +1,4 @@
+mod markdown;
 mod repl;
 mod tui;
 
@@ -13,7 +14,7 @@ use arta::{
 use futures_util::{StreamExt, stream};
 use std::{io::IsTerminal, process::ExitCode, sync::Arc};
 use tokio::{
-    io::{self, AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{self, AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader},
     task::spawn_blocking,
 };
 
@@ -29,7 +30,13 @@ async fn run_once(startup: &'static StartupConfig, prompt: &str) -> Result<()> {
     let replies = harness
         .session("cli")?
         .stream(startup.agent_name(), input.into_stream())?;
-    write_reply(replies, &mut io::stdout(), |_| {}).await
+    write_reply(
+        replies,
+        &mut io::stdout(),
+        markdown::TerminalOutput::detect(),
+        |_| {},
+    )
+    .await
 }
 
 async fn cli_harness(startup: &'static StartupConfig, fullscreen: bool) -> Result<Harness> {
@@ -88,20 +95,38 @@ async fn run_conversation(startup: &'static StartupConfig) -> Result<()> {
 
 async fn write_reply(
     mut replies: Stream<'_>,
-    stdout: &mut io::Stdout,
+    stdout: &mut (impl AsyncWrite + Unpin),
+    terminal: Option<markdown::TerminalOutput>,
     mut capture: impl FnMut(&str),
 ) -> Result<()> {
     let mut needs_newline = false;
+    // Render a whole message so later lines can resolve earlier Markdown syntax.
+    let mut markdown = String::new();
     while let Some(frame) = replies.next().await {
-        match frame? {
-            Frame::Begin => needs_newline = false,
-            Frame::Chunk(text) if !text.is_empty() => {
-                stdout.write_all(text.as_bytes()).await?;
-                stdout.flush().await?;
+        match frame {
+            Ok(Frame::Begin) => needs_newline = false,
+            Ok(Frame::Chunk(text)) if !text.is_empty() => {
+                if terminal.is_some() {
+                    markdown.push_str(&text);
+                } else {
+                    stdout.write_all(text.as_bytes()).await?;
+                    stdout.flush().await?;
+                    needs_newline = !text.ends_with('\n');
+                }
                 capture(&text);
-                needs_newline = !text.ends_with('\n');
             }
-            Frame::End if needs_newline => stdout.write_all(b"\n").await?,
+            Ok(Frame::End) | Err(_) => {
+                if let Some(terminal) = terminal {
+                    stdout
+                        .write_all(terminal.format(&markdown).as_bytes())
+                        .await?;
+                    markdown.clear();
+                } else if frame.is_ok() && needs_newline {
+                    stdout.write_all(b"\n").await?;
+                }
+                stdout.flush().await?;
+                frame?;
+            }
             _ => {}
         }
     }
@@ -154,4 +179,52 @@ async fn main() -> ExitCode {
 fn report_error(error: &anyhow::Error) -> ExitCode {
     eprintln!("error: {error:#}");
     ExitCode::FAILURE
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn terminal_reply_renders_markdown_across_chunk_boundaries() -> Result<()> {
+        let chunks = [
+            Ok("# Heading\n\n**bo".into()),
+            Ok("ld** and [docs][ref]\n\n[ref]: https://example.com".into()),
+        ];
+        let mut output = Vec::new();
+        let mut captured = String::new();
+        write_reply(
+            Message::new(stream::iter(chunks)).into_stream(),
+            &mut output,
+            Some(markdown::TerminalOutput {
+                width: 80,
+                ansi: false,
+            }),
+            |chunk| captured.push_str(chunk),
+        )
+        .await?;
+
+        let output = String::from_utf8(output)?;
+        assert_eq!(output, "Heading\n\nbold and docs (https://example.com)\n");
+        assert_eq!(
+            captured,
+            "# Heading\n\n**bold** and [docs][ref]\n\n[ref]: https://example.com"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn redirected_reply_writes_original_markdown() -> Result<()> {
+        let chunks = [Ok("# Heading\n\n".into()), Ok("**bold**".into())];
+        let mut output = Vec::new();
+        write_reply(
+            Message::new(stream::iter(chunks)).into_stream(),
+            &mut output,
+            None,
+            |_| {},
+        )
+        .await?;
+        assert_eq!(output, b"# Heading\n\n**bold**\n");
+        Ok(())
+    }
 }

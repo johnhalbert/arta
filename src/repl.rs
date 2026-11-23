@@ -1,3 +1,8 @@
+mod command;
+mod parser;
+pub(super) mod suggestion;
+
+use super::markdown::TerminalOutput;
 use anyhow::{Context, Result};
 use arta::{
     agent::Agent,
@@ -8,11 +13,11 @@ use futures_util::{TryStreamExt, stream};
 use std::io::IsTerminal;
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-pub(super) enum Action {
-    Ignore,
-    Exit,
-    Reset,
-    Prompt(String),
+#[derive(Default)]
+pub(super) struct Submission {
+    pub(super) prompt: Option<String>,
+    pub(super) exit: bool,
+    pub(super) history_cleared: bool,
 }
 
 /// Owns the conversation shared by the terminal and line-based interfaces.
@@ -29,16 +34,9 @@ impl<'a> Repl<'a> {
         }
     }
 
-    pub(super) fn submit(&mut self, input: String) -> Action {
-        match input.trim() {
-            "" => Action::Ignore,
-            "/exit" => Action::Exit,
-            "/reset" => {
-                self.history.clear();
-                Action::Reset
-            }
-            _ => Action::Prompt(input),
-        }
+    pub(super) fn submit(&mut self, input: String) -> Submission {
+        let (prompt, commands) = parser::parse(input);
+        command::execute(self, prompt, commands)
     }
 
     pub(super) fn history(&self) -> &[Turn] {
@@ -83,28 +81,30 @@ impl<'a> Repl<'a> {
             else {
                 break;
             };
-            match self.submit(line) {
-                Action::Ignore | Action::Reset => {}
-                Action::Exit => break,
-                Action::Prompt(prompt) => {
-                    let mut reply = String::new();
-                    let result = super::write_reply(self.reply(&prompt), &mut stdout, |chunk| {
-                        reply.push_str(chunk)
+            let submission = self.submit(line);
+            if submission.exit {
+                break;
+            }
+            if let Some(prompt) = submission.prompt {
+                let mut reply = String::new();
+                let terminal = TerminalOutput::detect();
+                let result =
+                    super::write_reply(self.reply(&prompt), &mut stdout, terminal, |chunk| {
+                        reply.push_str(chunk);
                     })
                     .await;
-                    match result {
-                        Ok(()) => self.complete(Turn { prompt, reply }),
-                        Err(error) if !interactive => return Err(error),
-                        Err(error) => {
-                            if !reply.is_empty() && !reply.ends_with('\n') {
-                                stdout.write_all(b"\n").await?;
-                                stdout.flush().await?;
-                            }
-                            stderr
-                                .write_all(format!("error: {error:#}\n").as_bytes())
-                                .await?;
-                            stderr.flush().await?;
+                match result {
+                    Ok(()) => self.complete(Turn { prompt, reply }),
+                    Err(error) if !interactive => return Err(error),
+                    Err(error) => {
+                        if terminal.is_none() && !reply.is_empty() && !reply.ends_with('\n') {
+                            stdout.write_all(b"\n").await?;
+                            stdout.flush().await?;
                         }
+                        stderr
+                            .write_all(format!("error: {error:#}\n").as_bytes())
+                            .await?;
+                        stderr.flush().await?;
                     }
                 }
             }
@@ -161,8 +161,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn reset_clears_history_and_keeps_the_system_prompt() -> Result<()> {
+    pub(super) fn test_harness() -> Result<Harness> {
         let mut harness = Harness::new(&Config::default())?;
         harness.register_provider("test", || Ok(Arc::new(TestProvider)))?;
         harness.create_session_with_agents(
@@ -179,16 +178,42 @@ mod tests {
                 },
             )],
         )?;
+        Ok(harness)
+    }
+
+    #[tokio::test]
+    async fn reset_clears_history_and_keeps_the_system_prompt() -> Result<()> {
+        let harness = test_harness()?;
         let mut repl = Repl::new(harness.agent("cli", "reviewer")?);
         repl.complete(Turn {
             prompt: "Hello".into(),
             reply: "Hi".into(),
         });
-        assert!(matches!(repl.submit("/reset".into()), Action::Reset));
+        let reset = repl.submit("/reset".into());
+        assert!(reset.history_cleared);
+        assert!(reset.prompt.is_none());
+        assert!(!reset.exit);
+        repl.complete(Turn {
+            prompt: "A new turn".into(),
+            reply: "Hi again".into(),
+        });
+        let reset_and_prompt = repl.submit("Hello /reset again /reset".into());
+        assert!(reset_and_prompt.history_cleared);
+        let prompt = reset_and_prompt.prompt.as_deref().unwrap();
+        assert_eq!(prompt, "Hello again");
         assert_eq!(
-            repl.reply("Hello again").try_collect::<Vec<_>>().await?,
+            repl.reply(prompt).try_collect::<Vec<_>>().await?,
             vec![Frame::Begin, Frame::Chunk("0".into()), Frame::End]
         );
+        repl.complete(Turn {
+            prompt: prompt.into(),
+            reply: "0".into(),
+        });
+        let exit = repl.submit("Text /exit /reset".into());
+        assert!(exit.exit);
+        assert!(exit.prompt.is_none());
+        assert!(exit.history_cleared);
+        assert!(repl.history().is_empty());
         Ok(())
     }
 }

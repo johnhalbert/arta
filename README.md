@@ -58,9 +58,13 @@ Set up `config.toml` in your working directory, then run `arta` with no argument
 .\target\release\arta.exe
 ```
 
-The full-screen view has two empty panes across the top and a conversation in the bottom half. Press Enter to send a prompt. Animated dots appear below Arta's name until the reply starts streaming. Use Page Up and Page Down to read earlier turns, or Ctrl+End to return to the latest reply. Enter `/reset` to clear the conversation, or use `/exit` or Ctrl+C to quit.
+The full-screen view has two empty panes across the top and a conversation in the bottom half. Press Enter to send a prompt. Animated dots appear below Arta's name until the reply starts streaming. The conversation renders Markdown in replies as they arrive, including headings, emphasis, lists, links, code blocks, and tables. Use Page Up and Page Down to read earlier turns, or Ctrl+End to return to the latest reply.
 
-With redirected input or output, `arta` reads one prompt per line and writes replies to standard output. `/reset`, `/exit`, and end-of-input work in this mode.
+Type `/` at the start of a word to see matching commands. Use the Up and Down arrow keys to select a command, Tab to complete it, and Enter to submit. Use `/reset` to clear conversation history and `/exit` or Ctrl+C to quit.
+
+Separate slash commands from other text with whitespace. On submission, commands run from left to right and the REPL sends any remaining prompt text to the model. For example, `/reset Explain gravity` clears the conversation before sending `Explain gravity`. If the prompt contains `/exit`, the REPL exits after processing the commands.
+
+With redirected input or output, `arta` reads one prompt per line and writes replies to standard output. It formats each complete reply when standard output is a terminal and streams the original Markdown when standard output is redirected. `/reset`, `/exit`, and end-of-input work in this mode.
 
 The current conversation counts toward the context limit. Use `/reset` to start a fresh conversation if the history fills the context.
 
@@ -111,7 +115,7 @@ When Arta finds skills at startup, it advertises their names and descriptions in
 
 ## One-shot input and output
 
-Use `--prompt -` to read UTF-8 text from standard input (`stdin`). `arta` writes the response to standard output (`stdout`). Use `--verbose` to see full llama.cpp diagnostics on standard error (`stderr`).
+Use `--prompt -` to read UTF-8 text from standard input (`stdin`). `arta` renders the complete response as Markdown when standard output (`stdout`) is a terminal. Redirect standard output to a file or pipe it to another command to receive the original Markdown as it streams. Use `--verbose` to see full llama.cpp diagnostics on standard error (`stderr`).
 
 If the model has a chat template, `arta` passes the prompt as one user message. Thinking is off by default and can be enabled with `chat.enable_thinking` for templates that support it. Without a chat template, `arta` passes the prompt as plain text.
 

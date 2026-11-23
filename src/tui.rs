@@ -1,4 +1,7 @@
-use super::repl::{Action, Repl};
+use super::{
+    markdown,
+    repl::{Repl, suggestion},
+};
 use anyhow::Result;
 use arta::{provider::Turn, stream::Frame as ReplyFrame};
 use crossterm::{
@@ -17,7 +20,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::Stylize,
     text::Line,
-    widgets::{Block, BorderType, Paragraph, Wrap},
+    widgets::{Block, BorderType, Clear, Paragraph, Wrap},
 };
 use std::{
     io, mem,
@@ -41,19 +44,21 @@ pub(super) async fn run(repl: &mut Repl<'_>) -> Result<()> {
         match tui.handle(event) {
             InputEvent::Quit => break,
             InputEvent::Continue => {}
-            InputEvent::Submit => match repl.submit(tui.input.take()) {
-                Action::Ignore => {}
-                Action::Exit => break,
-                Action::Reset => {
+            InputEvent::Submit => {
+                let submission = repl.submit(tui.input.take());
+                if submission.exit {
+                    break;
+                }
+                if submission.history_cleared {
                     tui.failure = None;
                     tui.scroll = None;
                 }
-                Action::Prompt(prompt) => {
-                    if !tui.respond(repl, prompt, &mut events, &mut screen).await? {
-                        break;
-                    }
+                if let Some(prompt) = submission.prompt
+                    && !tui.respond(repl, prompt, &mut events, &mut screen).await?
+                {
+                    break;
                 }
-            },
+            }
         }
     }
     Ok(())
@@ -129,6 +134,7 @@ impl Tui {
                     })
                     .collect();
                 self.input.insert(&text);
+                self.input.selected = 0;
             }
             Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
                 if key.modifiers.contains(KeyModifiers::CONTROL)
@@ -241,30 +247,77 @@ impl Tui {
 
         let mut lines = Vec::new();
         for turn in history {
-            append_turn(&mut lines, turn);
+            append_turn(&mut lines, turn, transcript.width);
         }
         if let Some(turn) = pending {
-            append_turn(&mut lines, turn);
+            append_turn(&mut lines, turn, transcript.width);
             if turn.reply.is_empty() {
                 lines.push(Line::raw(BUSY_FRAMES[self.busy_frame]).green());
             }
         }
         if let Some((turn, error)) = &self.failure {
-            append_turn(&mut lines, turn);
+            append_turn(&mut lines, turn, transcript.width);
             lines.push(Line::raw("Error").red().bold());
             lines.extend(display_lines(error).map(|line| line.red()));
         }
         self.page = transcript.height.saturating_sub(1).max(1);
         (self.latest, self.scroll) = render_transcript(frame, transcript, lines, self.scroll);
 
+        let suggestions = self.input.suggestions().filter(|_| !transcript.is_empty());
+        let menu_visible = suggestions.is_some();
+        if let Some(suggestions) = suggestions {
+            let height = suggestions
+                .commands
+                .len()
+                .min(usize::from(transcript.height));
+            let first = self.input.selected.saturating_sub(height - 1);
+            let options: Vec<_> = suggestions
+                .commands
+                .iter()
+                .enumerate()
+                .skip(first)
+                .take(height)
+                .map(|(index, command)| {
+                    let line = Line::from(vec![
+                        command.name.cyan().bold(),
+                        "  ".into(),
+                        command.description.into(),
+                    ]);
+                    if index == self.input.selected {
+                        line.reversed()
+                    } else {
+                        line
+                    }
+                })
+                .collect();
+            let width = options
+                .iter()
+                .map(Line::width)
+                .max()
+                .unwrap_or_default()
+                .min(usize::from(transcript.width)) as u16;
+            let menu = Rect::new(
+                transcript.x,
+                transcript.bottom() - height as u16,
+                width,
+                height as u16,
+            );
+            frame.render_widget(Clear, menu);
+            frame.render_widget(Paragraph::new(options), menu);
+        }
+
         if bordered {
-            let (title, controls) = if pending.is_some() {
-                (" Generating… ", " PgUp/PgDn scroll · Ctrl+C exit ")
+            let title = if pending.is_some() {
+                " Generating… "
             } else {
-                (
-                    " Prompt ",
-                    " Enter send · PgUp/PgDn scroll · /reset · /exit ",
-                )
+                " Prompt "
+            };
+            let controls = if menu_visible {
+                " Tab complete · ↑/↓ select "
+            } else if pending.is_some() {
+                " PgUp/PgDn scroll · Ctrl+C exit "
+            } else {
+                " Enter send · PgUp/PgDn scroll · / commands "
             };
             let block = Block::bordered()
                 .border_type(BorderType::Rounded)
@@ -300,43 +353,32 @@ fn render_transcript(
     (latest, (offset < latest).then_some(offset))
 }
 
-fn append_turn<'a>(lines: &mut Vec<Line<'a>>, turn: &'a Turn) {
+fn append_turn<'a>(lines: &mut Vec<Line<'a>>, turn: &'a Turn, width: u16) {
     if !lines.is_empty() {
         lines.push(Line::default());
     }
     lines.push(Line::raw("You").cyan().bold());
     lines.extend(display_lines(&turn.prompt));
     lines.push(Line::raw("Arta").green().bold());
-    lines.extend(display_lines(&turn.reply));
+    lines.extend(markdown::render(&turn.reply, width));
 }
 
 fn display_lines(text: &str) -> impl Iterator<Item = Line<'_>> {
-    text.lines().map(|line| {
-        if line.chars().any(char::is_control) {
-            let mut clean = String::new();
-            for character in line.chars() {
-                match character {
-                    '\t' => clean.push_str("    "),
-                    c if !c.is_control() => clean.push(c),
-                    _ => {}
-                }
-            }
-            Line::raw(clean)
-        } else {
-            Line::raw(line)
-        }
-    })
+    text.lines()
+        .map(|line| Line::raw(markdown::clean_terminal_text(line)))
 }
 
 #[derive(Default)]
 struct Editor {
     text: String,
     cursor: usize,
+    selected: usize,
 }
 
 impl Editor {
     fn take(&mut self) -> String {
         self.cursor = 0;
+        self.selected = 0;
         mem::take(&mut self.text)
     }
 
@@ -353,8 +395,29 @@ impl Editor {
             .unwrap_or(self.text.len())
     }
 
+    fn suggestions(&self) -> Option<suggestion::Suggestions> {
+        suggestion::matches(&self.text, self.cursor)
+    }
+
     fn edit(&mut self, code: KeyCode) {
         match code {
+            KeyCode::Up | KeyCode::Down => {
+                if let Some(suggestions) = self.suggestions() {
+                    self.selected = if code == KeyCode::Up {
+                        self.selected.saturating_sub(1)
+                    } else {
+                        (self.selected + 1).min(suggestions.commands.len() - 1)
+                    };
+                }
+                return;
+            }
+            KeyCode::Tab => {
+                if let Some(cursor) =
+                    suggestion::complete(&mut self.text, self.cursor, self.selected)
+                {
+                    self.cursor = self.boundary_at_or_after(cursor);
+                }
+            }
             KeyCode::Char(c) if !c.is_control() => self.insert(c.encode_utf8(&mut [0; 4])),
             KeyCode::Left | KeyCode::Backspace => {
                 let previous = self.text[..self.cursor]
@@ -379,6 +442,7 @@ impl Editor {
             KeyCode::End => self.cursor = self.text.len(),
             _ => {}
         }
+        self.selected = 0;
     }
 
     fn render(&self, frame: &mut Frame<'_>, area: Rect) {
@@ -429,7 +493,7 @@ mod tests {
 
         let pending = Turn {
             prompt: "Second".into(),
-            reply: "One\nTwo\nThree\nFour\nFive\nLast".into(),
+            reply: "One  \nTwo  \nThree  \nFour  \nFive  \nLast".into(),
         };
         terminal.draw(|frame| tui.render(frame, &history, Some(&pending)))?;
         assert_eq!(terminal.backend().buffer()[(0, 20)].symbol(), "L");
@@ -474,11 +538,16 @@ mod tests {
             assert_eq!(indicator, expected);
         }
 
-        pending.reply.push_str("Hi");
+        pending.reply.push_str("**Hi**");
         terminal.draw(|frame| tui.render(frame, &[], Some(&pending)))?;
         let buffer = terminal.backend().buffer();
         assert_eq!(buffer[(0, 19)].symbol(), "A");
         assert_eq!(buffer[(0, 20)].symbol(), "H");
+        assert!(
+            buffer[(0, 20)]
+                .modifier
+                .contains(ratatui::style::Modifier::BOLD)
+        );
         assert_eq!(buffer[(1, 20)].symbol(), "i");
         Ok(())
     }
@@ -494,5 +563,55 @@ mod tests {
         editor.edit(KeyCode::Delete);
         assert_eq!(editor.take(), "az");
         assert_eq!(editor.cursor, 0);
+    }
+
+    #[test]
+    fn slash_suggestions_render_and_complete_from_the_keyboard() -> Result<()> {
+        let mut terminal = Terminal::new(TestBackend::new(60, 24))?;
+        let mut tui = Tui::default();
+        let history = [Turn {
+            prompt: "Earlier prompt".into(),
+            reply: "First  \n**xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx**  \nLast".into(),
+        }];
+        terminal.draw(|frame| tui.render(frame, &history, None))?;
+        assert_eq!(terminal.backend().buffer()[(0, 18)].symbol(), "F");
+        assert_eq!(terminal.backend().buffer()[(25, 19)].symbol(), "x");
+        let page = tui.page;
+
+        let key = |code| Event::Key(KeyEvent::new(code, KeyModifiers::NONE));
+        tui.handle(key(KeyCode::Char('/')));
+        terminal.draw(|frame| tui.render(frame, &history, None))?;
+        let buffer = terminal.backend().buffer();
+        assert_eq!(tui.page, page);
+        assert_eq!(buffer[(0, 18)].symbol(), "F");
+        assert_eq!(buffer[(25, 19)].symbol(), " ");
+        assert_eq!(buffer[(40, 19)].symbol(), "x");
+        let first: String = (0..5).map(|column| buffer[(column, 19)].symbol()).collect();
+        let second: String = (0..6).map(|column| buffer[(column, 20)].symbol()).collect();
+        assert_eq!(first, "/exit");
+        assert_eq!(second, "/reset");
+        assert!(
+            buffer[(0, 19)]
+                .modifier
+                .contains(ratatui::style::Modifier::REVERSED)
+        );
+
+        tui.handle(key(KeyCode::Down));
+        tui.handle(key(KeyCode::Tab));
+        assert_eq!(tui.input.text, "/reset ");
+        assert_eq!(tui.input.cursor, tui.input.text.len());
+        assert!(tui.input.suggestions().is_none());
+        terminal.draw(|frame| tui.render(frame, &history, None))?;
+        assert_eq!(terminal.backend().buffer()[(25, 19)].symbol(), "x");
+
+        tui.handle(Event::Paste("café /exzt\u{2003}later".into()));
+        for _ in 0..8 {
+            tui.handle(key(KeyCode::Left));
+        }
+        assert!(tui.input.text[..tui.input.cursor].ends_with("/ex"));
+        tui.handle(key(KeyCode::Tab));
+        assert_eq!(tui.input.text, "/reset café /exit\u{2003}later");
+        assert_eq!(&tui.input.text[tui.input.cursor..], "later");
+        Ok(())
     }
 }
