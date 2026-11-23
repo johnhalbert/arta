@@ -72,3 +72,64 @@ fn cli_overrides_change_only_the_selected_settings() -> Result<()> {
     assert_eq!(merged.verbose, original.verbose);
     Ok(())
 }
+
+#[test]
+fn runtime_settings_survive_cli_overrides() -> Result<()> {
+    let mut config: Config = toml::from_str(
+        r#"
+[providers."llama.cpp"]
+context_length = 0
+numa = "distribute"
+
+[providers."llama.cpp".context]
+n_threads = 4
+flash_attention = "auto"
+cache_type_k = "q8_0"
+
+[providers."llama.cpp".sampling]
+seed = 42
+samplers = ["top_k", "temperature"]
+temp = 0.0
+logit_bias = [{ token = 123, bias = -2.0 }]
+
+[providers."llama.cpp".chat]
+template_file = "chat.jinja"
+enable_thinking = true
+stop = ["END"]
+
+[[providers."llama.cpp".models]]
+id = "local"
+path = "first.gguf"
+additional_shards = ["second.gguf"]
+devices = ["CUDA0", "CUDA1"]
+split_mode = "layer"
+tensor_split = [3.0, 1.0]
+tensor_buffer_overrides = [{ pattern = '^blk\.0\.', buffer_type = "CPU" }]
+check_tensors = true
+use_extra_bufts = false
+no_host = true
+load_mode = "mmap+mlock"
+kv_override = { key = "tokenizer.ggml.add_bos_token", value = true }
+"#,
+    )?;
+    let original: LlamaCPPConfig = config.provider_settings(LlamaCPP::ID)?;
+    let mut expected = toml::Table::try_from(original)?;
+    expected["max_tokens"] = toml::Value::Integer(32);
+    LlamaCPPOverrides {
+        max_tokens: NonZeroU32::new(32),
+        ..Default::default()
+    }
+    .apply(&mut config)?;
+    let merged: LlamaCPPConfig = config.provider_settings(LlamaCPP::ID)?;
+    assert_eq!(toml::Table::try_from(merged)?, expected);
+
+    LlamaCPPOverrides {
+        model_path: Some("replacement.gguf".into()),
+        ..Default::default()
+    }
+    .apply(&mut config)?;
+    let merged: LlamaCPPConfig = config.provider_settings(LlamaCPP::ID)?;
+    assert!(merged.models[0].additional_shards.is_empty());
+    assert!(merged.models[0].kv_override.is_some());
+    Ok(())
+}

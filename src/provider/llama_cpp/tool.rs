@@ -2,7 +2,7 @@ use super::{LlamaCPP, Sampling, generate, model::chat_messages, text::text_chunk
 use crate::provider::tool::{ToolAdapter, ToolCall, ToolRequest, ToolResponse};
 use anyhow::{Context, Result, ensure};
 use futures_util::future::BoxFuture;
-use llama_cpp_4::prelude::{AddBos, ChatApplyParams};
+use llama_cpp_4::prelude::AddBos;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{cell::Cell, sync::Arc};
@@ -22,9 +22,8 @@ impl ToolAdapter for LlamaCPP {
                 "system prompt contains a NUL character"
             );
             let model = Arc::clone(self.loaded_model(request.model_id)?);
-            let params = tool_prompt(&request);
-            let context_length = self.context_length;
-            let max_tokens = self.max_tokens;
+            let (messages, tools) = tool_prompt(&request);
+            let inference = Arc::clone(&self.inference);
             let previous_calls: usize = request.exchanges.iter().map(|turn| turn.calls.len()).sum();
             let runtime =
                 Handle::try_current().context("llama.cpp inference requires a Tokio runtime")?;
@@ -33,6 +32,7 @@ impl ToolAdapter for LlamaCPP {
                 .spawn_blocking(move || {
                     let cancelled = || worker_cancel.is_closed();
                     ensure!(!cancelled(), "llama.cpp inference cancelled");
+                    let params = model.chat.params(messages, Some(tools))?;
                     let chat = model
                         .tool_template()?
                         .apply(&params)
@@ -45,14 +45,14 @@ impl ToolAdapter for LlamaCPP {
                     let tokens = chat
                         .tokenize_prompt(&model.inner, add_bos)
                         .context("failed to tokenize tool prompt")?;
-                    let stops = serde_json::from_str(&chat.additional_stops_json)
+                    let mut stops: Vec<String> = serde_json::from_str(&chat.additional_stops_json)
                         .context("failed to read chat template stop strings")?;
+                    stops.extend(model.chat.stop.iter().cloned());
                     let exhausted = Cell::new(false);
                     let pieces = generate(
                         &model,
                         tokens,
-                        context_length,
-                        max_tokens,
+                        &inference,
                         Sampling::Tools {
                             chat: &chat,
                             exhausted: &exhausted,
@@ -75,7 +75,7 @@ impl ToolAdapter for LlamaCPP {
     }
 }
 
-fn tool_prompt(request: &ToolRequest<'_>) -> ChatApplyParams {
+fn tool_prompt(request: &ToolRequest<'_>) -> (String, String) {
     let mut messages = chat_messages(request.system_prompt, request.history, request.prompt);
     for exchange in request.exchanges {
         let calls: Vec<_> = exchange
@@ -133,9 +133,10 @@ fn tool_prompt(request: &ToolRequest<'_>) -> ChatApplyParams {
             })
         })
         .collect();
-    ChatApplyParams::new(Value::Array(messages).to_string())
-        .with_tools(Value::Array(tools).to_string())
-        .with_enable_thinking(false)
+    (
+        Value::Array(messages).to_string(),
+        Value::Array(tools).to_string(),
+    )
 }
 
 #[derive(Deserialize)]

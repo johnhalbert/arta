@@ -1,18 +1,20 @@
 mod template;
 
+use super::{ChatConfig, LlamaCPPModelConfig};
 use crate::{model::Model, provider::Turn};
 use anyhow::{Context, Result, ensure};
 use llama_cpp_4::prelude::{
-    ChatTemplates, LlamaBackend, LlamaContext, LlamaContextParams, LlamaModel, LlamaModelParams,
-    LlamaToken, supports_gpu_offload,
+    ChatParams, ChatTemplates, LlamaBackend, LlamaContext, LlamaContextParams, LlamaModel,
+    LlamaToken,
 };
 use serde_json::{Value, json};
-use std::{num::NonZeroU32, path::Path, sync::Arc};
+use std::{path::Path, sync::Arc};
 use template::ModelTemplate;
 
 pub(super) struct LlamaCPPModel {
     id: Arc<str>,
     template: ModelTemplate,
+    pub(super) chat: Arc<ChatConfig>,
     pub(super) inner: LlamaModel,
     // Keep the backend alive until after the native model drops.
     backend: Arc<LlamaBackend>,
@@ -22,37 +24,36 @@ impl LlamaCPPModel {
     pub(super) fn load(
         id: Arc<str>,
         backend: Arc<LlamaBackend>,
-        path: &Path,
-        gpu_layers: u32,
+        config: &LlamaCPPModelConfig,
+        chat: Arc<ChatConfig>,
     ) -> Result<Self> {
-        let metadata = path
-            .metadata()
-            .with_context(|| format!("cannot access model '{}'", path.display()))?;
-        ensure!(
-            metadata.is_file(),
-            "model '{}' must be a file",
-            path.display()
-        );
-
-        ensure!(
-            gpu_layers == 0 || (cfg!(feature = "cuda") && supports_gpu_offload()),
-            "GPU offload is unavailable. Build with --features cuda and use a CUDA device, or set --gpu-layers 0"
-        );
-
-        let parameters = LlamaModelParams::default().with_n_gpu_layers(gpu_layers);
-        let inner = LlamaModel::load_from_file(&backend, path, &parameters)
-            .with_context(|| format!("failed to load GGUF model '{}'", path.display()))?;
+        let path = &config.path;
+        check_model_file(path)?;
+        for shard in &config.additional_shards {
+            check_model_file(shard)?;
+        }
+        let parameters = config.params(&backend)?;
+        let inner = if config.additional_shards.is_empty() {
+            LlamaModel::load_from_file(&backend, path, &parameters)
+        } else {
+            let paths: Vec<_> = std::iter::once(path)
+                .chain(&config.additional_shards)
+                .collect();
+            LlamaModel::load_from_splits(&backend, &paths, &parameters)
+        }
+        .with_context(|| format!("failed to load GGUF model '{}'", path.display()))?;
         ensure!(
             inner.has_decoder() && !inner.has_encoder() && !inner.is_diffusion(),
             "model '{}' does not support decoder-only text generation",
             path.display()
         );
 
-        let template = ModelTemplate::from_model(&inner)?;
+        let template = ModelTemplate::from_model(&inner, chat.template.as_deref())?;
 
         Ok(Self {
             id,
             template,
+            chat,
             inner,
             backend,
         })
@@ -63,23 +64,32 @@ impl LlamaCPPModel {
         system_prompt: Option<&str>,
         history: &[Turn],
         prompt: &str,
-    ) -> Result<(Vec<LlamaToken>, Vec<String>)> {
+    ) -> Result<(Vec<LlamaToken>, Vec<String>, Option<ChatParams>)> {
         self.template
-            .prepare_prompt(&self.inner, system_prompt, history, prompt)
+            .prepare_prompt(&self.inner, &self.chat, system_prompt, history, prompt)
     }
 
-    pub(super) fn new_context(&self, context_length: NonZeroU32) -> Result<LlamaContext<'_>> {
+    pub(super) fn new_context(&self, params: LlamaContextParams) -> Result<LlamaContext<'_>> {
         self.inner
-            .new_context(
-                &self.backend,
-                LlamaContextParams::default().with_n_ctx(Some(context_length)),
-            )
+            .new_context(&self.backend, params)
             .context("failed to create inference context")
     }
 
     pub(super) fn tool_template(&self) -> Result<&ChatTemplates> {
         self.template.tool_template()
     }
+}
+
+fn check_model_file(path: &Path) -> Result<()> {
+    let metadata = path
+        .metadata()
+        .with_context(|| format!("cannot access model '{}'", path.display()))?;
+    ensure!(
+        metadata.is_file(),
+        "model '{}' must be a file",
+        path.display()
+    );
+    Ok(())
 }
 
 impl Model for LlamaCPPModel {

@@ -1,9 +1,9 @@
 use super::chat_messages;
-use crate::provider::Turn;
+use crate::provider::{Turn, llama_cpp::ChatConfig};
 use anyhow::{Context, Result, bail, ensure};
 use llama_cpp_4::{
     StringFromModelError,
-    prelude::{AddBos, ChatApplyParams, ChatTemplates, LlamaModel, LlamaToken, Special},
+    prelude::{AddBos, ChatParams, ChatTemplates, LlamaModel, LlamaToken, Special},
 };
 use serde_json::Value;
 
@@ -13,7 +13,12 @@ pub(super) enum ModelTemplate {
 }
 
 impl ModelTemplate {
-    pub(super) fn from_model(model: &LlamaModel) -> Result<Self> {
+    pub(super) fn from_model(model: &LlamaModel, template: Option<&str>) -> Result<Self> {
+        if let Some(template) = template {
+            return ChatTemplates::from_model(model, Some(template))
+                .map(Self::Embedded)
+                .context("invalid configured chat template");
+        }
         match model.chat_template(None) {
             Ok(template) if !template.is_empty() => ChatTemplates::from_model(model, None)
                 .map(Self::Embedded)
@@ -25,7 +30,7 @@ impl ModelTemplate {
 
     pub(super) fn tool_template(&self) -> Result<&ChatTemplates> {
         let Self::Embedded(templates) = self else {
-            bail!("tool use requires a model with an embedded chat template");
+            bail!("tool use requires a chat template");
         };
         let caps: Value = serde_json::from_str(&templates.caps_json()?)
             .context("failed to read chat template capabilities")?;
@@ -39,10 +44,11 @@ impl ModelTemplate {
     pub(super) fn prepare_prompt(
         &self,
         model: &LlamaModel,
+        config: &ChatConfig,
         system_prompt: Option<&str>,
         history: &[Turn],
         prompt: &str,
-    ) -> Result<(Vec<LlamaToken>, Vec<String>)> {
+    ) -> Result<(Vec<LlamaToken>, Vec<String>, Option<ChatParams>)> {
         ensure!(
             !system_prompt.is_some_and(|prompt| prompt.contains('\0')),
             "system prompt contains a NUL character"
@@ -55,17 +61,17 @@ impl ModelTemplate {
 
         if let Self::Embedded(templates) = self {
             let messages = chat_messages(system_prompt, history, prompt);
-            let params = ChatApplyParams::new(Value::Array(messages).to_string())
-                .with_enable_thinking(false);
+            let params = config.params(Value::Array(messages).to_string(), None)?;
             let chat = templates
                 .apply(&params)
                 .context("failed to format prompt")?;
             let tokens = chat
                 .tokenize_prompt(model, add_bos)
                 .context("failed to tokenize chat prompt")?;
-            let stops = serde_json::from_str(&chat.additional_stops_json)
+            let mut stops: Vec<String> = serde_json::from_str(&chat.additional_stops_json)
                 .context("failed to read chat template stop strings")?;
-            return Ok((tokens, stops));
+            stops.extend(config.stop.iter().cloned());
+            return Ok((tokens, stops, Some(chat)));
         }
 
         let mut transcript;
@@ -93,6 +99,6 @@ impl ModelTemplate {
         let tokens = model
             .str_to_token_with_special(prompt, add_bos, Special::Plaintext)
             .context("failed to tokenize prompt")?;
-        Ok((tokens, Vec::new()))
+        Ok((tokens, config.stop.clone(), None))
     }
 }

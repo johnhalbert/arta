@@ -1,17 +1,23 @@
 mod config;
 mod model;
+mod sampling;
 mod text;
 mod tool;
 
 use super::{Provider, Turn, registry::ProviderRegistration, tool::ToolAdapter};
 use crate::{config::Config, model::Model, stream::Message};
 use anyhow::{Context, Result, bail, ensure};
-pub use config::{LlamaCPPConfig, LlamaCPPModelConfig, LlamaCPPOverrides};
-use futures_util::{future::BoxFuture, stream};
-use llama_cpp_4::prelude::{
-    ChatParams, LlamaBackend, LlamaBatch, LlamaSampler, LlamaToken, Special,
+pub use config::{
+    AttentionType, CacheType, ChatConfig, ChatReasoningFormat, ChatToolChoice, ContextConfig,
+    FlashAttention, LlamaCPPConfig, LlamaCPPModelConfig, LlamaCPPOverrides, MetadataOverride,
+    MetadataValue, ModelLazyMode, ModelLoadMode, ModelSplitMode, NumaConfig, RopeScaling,
+    TensorBufferOverride,
 };
+use futures_util::{future::BoxFuture, stream};
+use llama_cpp_4::prelude::{ChatParams, LlamaBatch, LlamaToken, Special};
 use model::LlamaCPPModel;
+use sampling::Sampler;
+pub use sampling::{LogitBias, SamplerStage, SamplingConfig};
 use std::{
     cell::Cell,
     collections::{HashMap, hash_map::Entry},
@@ -25,8 +31,7 @@ use tokio::{
 
 pub struct LlamaCPP {
     models: HashMap<Arc<str>, Arc<LlamaCPPModel>>,
-    context_length: Option<NonZeroU32>,
-    max_tokens: NonZeroU32,
+    inference: Arc<InferenceConfig>,
 }
 
 inventory::submit! {
@@ -38,40 +43,44 @@ impl LlamaCPP {
 
     fn from_config(config: &Config) -> Result<Arc<dyn Provider>> {
         let mut settings: LlamaCPPConfig = config.provider_settings(Self::ID)?;
-        for model in &mut settings.models {
-            model.path = config.resolve_path(&model.path);
-        }
+        settings.resolve_paths(config);
         Ok(Arc::new(Self::new(settings)?))
     }
 
     /// Initialize the backend and load the configured models.
-    pub fn new(config: LlamaCPPConfig) -> Result<Self> {
+    pub fn new(mut config: LlamaCPPConfig) -> Result<Self> {
+        config.context.validate()?;
+        if let Some(sampling) = &config.sampling {
+            sampling.validate()?;
+        }
+        config.chat.load_template()?;
+        let backend = config.init_backend()?;
         let mut provider = Self {
             models: HashMap::with_capacity(config.models.len()),
-            context_length: config.context_length,
-            max_tokens: config.max_tokens,
+            inference: Arc::new(InferenceConfig {
+                context_length: config.context_length,
+                max_tokens: config.max_tokens,
+                context: config.context,
+                sampling: config.sampling,
+            }),
         };
-        if config.models.is_empty() {
+        let Some(backend) = backend else {
             return Ok(provider);
-        }
-        let mut backend = LlamaBackend::init().context("failed to initialize llama.cpp")?;
-        if !config.verbose {
-            backend.void_logs();
-        }
-        let backend = Arc::new(backend);
+        };
+        let chat = Arc::new(config.chat);
         for model in config.models {
             ensure!(
                 !model.id.trim().is_empty(),
                 "model identifier cannot be empty"
             );
-            let id: Arc<str> = model.id.into();
+            let id: Arc<str> = model.id.as_str().into();
             match provider.models.entry(Arc::clone(&id)) {
                 Entry::Vacant(entry) => {
                     entry.insert(Arc::new(LlamaCPPModel::load(
                         id,
                         Arc::clone(&backend),
-                        &model.path,
-                        model.gpu_layers,
+                        &model,
+                        Arc::clone(&chat),
                     )?));
                 }
                 Entry::Occupied(entry) => bail!("model '{}' is already registered", entry.key()),
@@ -122,8 +131,7 @@ impl Provider for LlamaCPP {
             let history = history.to_vec();
             let prompt = prompt.to_owned();
             let system_prompt = system_prompt.map(str::to_owned);
-            let context_length = self.context_length;
-            let max_tokens = self.max_tokens;
+            let inference = Arc::clone(&self.inference);
             let runtime =
                 Handle::try_current().context("llama.cpp inference requires a Tokio runtime")?;
             let (ready, prepared) = oneshot::channel();
@@ -133,14 +141,13 @@ impl Provider for LlamaCPP {
                     return Ok(());
                 }
                 ensure!(!prompt.contains('\0'), "prompt contains a NUL character");
-                let (tokens, stops) =
+                let (tokens, stops, chat) =
                     model.prepare_prompt(system_prompt.as_deref(), &history, &prompt)?;
                 let pieces = generate(
                     &model,
                     tokens,
-                    context_length,
-                    max_tokens,
-                    Sampling::Text,
+                    &inference,
+                    Sampling::Text(chat.as_ref()),
                     || sender.is_closed(),
                 )?;
                 if ready.send(()).is_err() {
@@ -179,29 +186,35 @@ impl Provider for LlamaCPP {
 }
 
 enum Sampling<'a> {
-    Text,
+    Text(Option<&'a ChatParams>),
     Tools {
         chat: &'a ChatParams,
         exhausted: &'a Cell<bool>,
     },
 }
 
+struct InferenceConfig {
+    context_length: Option<u32>,
+    max_tokens: NonZeroU32,
+    context: ContextConfig,
+    sampling: Option<SamplingConfig>,
+}
+
 fn generate<'a>(
     model: &'a LlamaCPPModel,
     tokens: Vec<LlamaToken>,
-    context_length: Option<NonZeroU32>,
-    max_tokens: NonZeroU32,
+    config: &InferenceConfig,
     sampling: Sampling<'a>,
     cancelled: impl Fn() -> bool + 'a,
 ) -> Result<impl Iterator<Item = Result<Vec<u8>>> + 'a> {
     let trained_context_length = model.trained_context_length();
-    let context_length = context_length
-        .or_else(|| NonZeroU32::new(trained_context_length.min(4096)))
-        .context("model has no usable context length")?;
-    ensure!(
-        context_length.get() <= trained_context_length,
-        "requested context length {context_length} exceeds the model's trained context length of {trained_context_length} tokens"
-    );
+    let context_length = match config.context_length {
+        None => trained_context_length.min(4096),
+        Some(0) => trained_context_length,
+        Some(length) => length,
+    };
+    let context_length =
+        NonZeroU32::new(context_length).context("model has no usable context length")?;
     ensure!(
         context_length.get() <= i32::MAX as u32,
         "context length exceeds llama.cpp's token position limit"
@@ -216,14 +229,14 @@ fn generate<'a>(
     );
 
     // Each prompt gets a fresh context while sharing the loaded model.
-    let mut ctx = model.new_context(context_length)?;
+    let mut ctx = model.new_context(config.context.params(context_length))?;
     let capacity = context_capacity.min(ctx.n_ctx_seq() as usize);
     ensure!(
         tokens.len() < capacity,
         "prompt exceeds the usable inference context"
     );
 
-    let batch_size = tokens.len().min(ctx.n_batch() as usize);
+    let batch_size = config.context.prompt_batch_size(&ctx, tokens.len());
     ensure!(
         batch_size > 0,
         "inference context has an empty batch capacity"
@@ -240,15 +253,8 @@ fn generate<'a>(
         ctx.decode(&mut batch).context("failed to decode prompt")?;
     }
 
-    let grammar = match sampling {
-        Sampling::Text => None,
-        Sampling::Tools { chat, .. } => chat.grammar_sampler(&model.inner),
-    };
-    let sampler = match grammar {
-        Some(grammar) => LlamaSampler::chain_simple([grammar, LlamaSampler::greedy()]),
-        None => LlamaSampler::greedy(),
-    };
-    let limit = (max_tokens.get() as usize).min(capacity - tokens.len());
+    let mut sampler = Sampler::new(&model.inner, config.sampling.as_ref(), &sampling, &tokens)?;
+    let limit = (config.max_tokens.get() as usize).min(capacity - tokens.len());
     let mut previous_token = None;
     Ok((0..limit)
         .map(move |index| -> Result<Option<Vec<u8>>> {
@@ -264,14 +270,14 @@ fn generate<'a>(
             }
 
             let token = sampler
-                .try_sample(&ctx, -1)
+                .sample(&mut ctx)
                 .context("failed to sample response")?;
             if model.inner.is_eog_token(token) {
                 return Ok(None);
             }
             previous_token = Some(token);
             let bytes = match sampling {
-                Sampling::Text => model.inner.token_to_bytes(token, Special::Plaintext)?,
+                Sampling::Text(_) => model.inner.token_to_bytes(token, Special::Plaintext)?,
                 Sampling::Tools { exhausted, .. } => {
                     exhausted.set(index + 1 == limit);
                     model.inner.token_to_raw_bytes(token, Special::Tokenize)?

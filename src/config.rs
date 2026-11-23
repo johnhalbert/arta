@@ -79,7 +79,7 @@ struct Args {
     #[arg(long, value_name = "TOKENS")]
     max_tokens: Option<NonZeroU32>,
 
-    /// Number of layers to offload to the GPU (requires a CUDA build).
+    /// Number of layers to offload to an available GPU.
     #[arg(long, value_name = "LAYERS")]
     gpu_layers: Option<u32>,
 

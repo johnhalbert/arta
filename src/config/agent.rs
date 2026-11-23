@@ -127,7 +127,7 @@ mod tests {
         assert_eq!(settings.app.model, "review");
         let provider: LlamaCPPConfig = settings.provider_settings(LlamaCPP::ID)?;
         assert_eq!(provider.max_tokens.get(), 48);
-        assert_eq!(provider.context_length.unwrap().get(), 4096);
+        assert_eq!(provider.context_length, None);
         assert_eq!(provider.models[0].id, "local");
         assert_eq!(provider.models[1].id, "review");
         assert_eq!(provider.models[1].path, directory.join("review.gguf"));

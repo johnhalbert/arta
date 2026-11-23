@@ -114,6 +114,7 @@ dependencies = [
  "futures-util",
  "inventory",
  "llama-cpp-4",
+ "llama-cpp-sys-4",
  "ratatui",
  "rmcp",
  "serde",
@@ -1213,8 +1214,6 @@ checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
 [[package]]
 name = "llama-cpp-4"
 version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "51569cd1e166802987b7d784b0bb90c54fc000bd0a15e88c0608b4e169ee9d07"
 dependencies = [
  "enumflags2",
  "llama-cpp-sys-4",

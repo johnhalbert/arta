@@ -4,7 +4,7 @@
 
 ## Build and run on Windows
 
-To build `arta`, you need Rust, CMake, a C++ compiler, and LLVM's `libclang`. On Windows, use the Visual Studio C++ Build Tools.
+To build `arta`, you need Rust, CMake, a C++ compiler, and LLVM's `libclang`. On Windows, use the Visual Studio C++ Build Tools. The default build enables CUDA and requires the NVIDIA CUDA Toolkit.
 
 1. Build the release executable.
 
@@ -22,6 +22,8 @@ To build `arta`, you need Rust, CMake, a C++ compiler, and LLVM's `libclang`. On
 
 If you move the executable, keep the native libraries from Cargo in the same directory as the executable.
 
+Cargo builds the vendored `llama-cpp-4` 0.11.0 wrapper with ARTA's model-load setters. The native `llama-cpp-sys-4` dependency resolves through `Cargo.lock`.
+
 To run `arta` through Cargo, add the same `arta` arguments after `cargo run --release --`.
 
 ## Configure providers
@@ -35,6 +37,18 @@ For llama.cpp, the existing flags override the config values for one run. A rela
 ```powershell
 .\target\release\arta.exe --config config.toml --prompt "Hello" --max-tokens 32
 ```
+
+The llama.cpp runtime settings are optional. An entry with just `id` and `path` uses CPU model loading, a context of up to 4096 tokens, greedy decoding, and a 256-token response limit. The settings under the provider apply to each registered model. `config.example.toml` lists the available keys and values.
+
+| TOML section | Settings |
+| --- | --- |
+| `[providers."llama.cpp"]` | Context length, response limit, diagnostics, and NUMA. |
+| `[providers."llama.cpp".context]` | CPU threads, batch and microbatch sizes, Flash Attention, KV cache types and offload, RoPE and YaRN, and context memory settings. Omitted fields inherit llama.cpp defaults. Set the provider's `context_length = 0` to use the model's full trained length. Larger explicit values enable context extension on compatible models. |
+| `[providers."llama.cpp".sampling]` | Sampler order, seed, temperature, filters, repetition penalties, DRY, XTC, adaptive sampling, Mirostat, logit biases, grammars, JSON Schema, and reasoning budgets. Adding the table opts into llama.cpp's sampler defaults. Set `temp = 0.0` for greedy token selection with the default sampler order. Tool calls use the chat template's grammar. |
+| `[providers."llama.cpp".chat]` | Template overrides, template arguments, thinking, tool choice, and stop strings. The model's embedded template is used by default. |
+| `[[providers."llama.cpp".models]]` | GGUF path and shards, GPU placement, tensor validation and buffer overrides, file loading and lazy tensor modes, MTP weight loading, and one GGUF metadata override per model. |
+
+Resolve `template_file` and `additional_shards` relative to `config.toml`. Server, quantization, embedding, and speculative decoding options belong to separate llama.cpp workflows.
 
 ## Interactive conversations
 
@@ -78,7 +92,7 @@ Configure MCP servers under `[mcp.servers]` to make their tools available in one
 
 Arta discovers tools at startup and exposes them as `server__tool` names, with periods replaced by underscores. Set `tools` on a server to list the original names to expose. Omitting it exposes every tool the server advertises. The model can invoke exposed tools automatically, so configure servers and tools you trust to run.
 
-The llama.cpp model needs an embedded chat template that supports tool calls. Arta runs up to eight calls per prompt and feeds text or structured JSON results back into the model. Tool schemas and results count toward the context limit. Each inference step has its own `max_tokens` budget. With tools enabled, Arta buffers inference steps and displays the final reply when it is ready.
+The llama.cpp model needs a chat template that supports tool calls. Arta runs up to eight calls per prompt and feeds text or structured JSON results back into the model. Tool schemas and results count toward the context limit. Each inference step has its own `max_tokens` budget. With tools enabled, Arta buffers inference steps and displays the final reply when it is ready.
 
 Rust callers can implement `arta::tool::Tool` and use `Harness::register_tool` for in-process tools. Call `Harness::connect_mcp` to load configured MCP tools. Create sessions after registering tools so their agents receive the resulting tool set.
 
@@ -99,7 +113,7 @@ When Arta finds skills at startup, it advertises their names and descriptions in
 
 Use `--prompt -` to read UTF-8 text from standard input (`stdin`). `arta` writes the response to standard output (`stdout`). Use `--verbose` to see full llama.cpp diagnostics on standard error (`stderr`).
 
-If the model has a chat template, `arta` passes the prompt as one user message. If the template supports a thinking setting, `arta` disables thinking. If the model has no chat template, `arta` passes the prompt as plain text.
+If the model has a chat template, `arta` passes the prompt as one user message. Thinking is off by default and can be enabled with `chat.enable_thinking` for templates that support it. Without a chat template, `arta` passes the prompt as plain text.
 
 ## Token limits
 
@@ -108,12 +122,22 @@ If the model has a chat template, `arta` passes the prompt as one user message. 
 
 ## Use a GPU
 
-1. Install the NVIDIA CUDA Toolkit.
-2. Use the `cuda` feature when you build `arta`.
-3. Use `--gpu-layers` to specify how many model layers the GPU processes.
+Choose the build features for the backends you want available. Each GPU backend requires its development toolkit to build and a compatible driver to run. Linked backend libraries also need their runtime DLLs present at startup, including when you select CPU inference.
 
-```powershell
-cargo run --locked --release --features cuda --target-dir target/cuda -- --model .\gguf\Qwen3.5-4B-Q4_0.gguf --prompt "Hello" --gpu-layers 20
-```
+| Build | Command | GPU build tools |
+| --- | --- | --- |
+| CUDA (default) | `cargo build --locked --release` | NVIDIA CUDA Toolkit |
+| ROCm | `cargo build --locked --release --no-default-features --features hip` | AMD ROCm or the Windows HIP SDK with Clang |
+| Vulkan | `cargo build --locked --release --no-default-features --features vulkan` | Vulkan SDK and shader compiler |
+| CUDA and Vulkan | `cargo build --locked --release --features vulkan` | CUDA Toolkit and Vulkan SDK |
+| CPU only | `cargo build --locked --release --no-default-features` | — |
 
-For the full-screen interface, set `gpu_layers` in the selected model's `config.toml` entry, then run the CUDA executable with no arguments.
+Build ROCm with `--no-default-features` to select HIP. The pinned linked build uses a shared backend entry point for CUDA and HIP. llama.cpp also supports shipping backends as separately built, dynamically loaded libraries. [llama.cpp GPU backend build guide](https://github.com/ggml-org/llama.cpp/blob/master/docs/build.md#notes-about-gpu-accelerated-backends)
+
+For HIP on Windows, select the SDK's `clang` and `clang++` with `CC` and `CXX` in a Visual Studio developer shell. [llama.cpp HIP setup](https://github.com/ggml-org/llama.cpp/blob/master/docs/build.md#hip)
+
+Set `gpu_layers` in the model's `config.toml` entry to offload weights, or use `--gpu-layers` for one run. Use `devices` for an ordered list of backend names, such as `["CUDA0"]`, `["ROCm0"]`, or `["Vulkan0"]`. Omit it for automatic device selection or set `devices = []` for CPU-only inference in the same executable.
+
+Set `split_mode = "none"` to use the device at the zero-based `main_gpu` index. The default `"layer"` mode distributes layers across devices. The `"row"` and experimental `"tensor"` modes depend on backend and model support. Set `tensor_split` to relative weights in device order.
+
+Set `tensor_buffer_overrides` to an ordered list of entries with `pattern` and `buffer_type`. llama.cpp uses the first matching regular expression for each tensor. Use a registered backend buffer type such as `"CPU"`.

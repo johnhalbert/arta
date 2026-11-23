@@ -1,19 +1,38 @@
+mod chat;
+mod context;
+mod model;
+
+pub use chat::{ChatConfig, ChatReasoningFormat, ChatToolChoice};
+pub use context::{AttentionType, CacheType, ContextConfig, FlashAttention, RopeScaling};
+pub use model::{
+    LlamaCPPModelConfig, MetadataOverride, MetadataValue, ModelLazyMode, ModelLoadMode,
+    ModelSplitMode, TensorBufferOverride,
+};
+
 use super::LlamaCPP;
+use super::sampling::SamplingConfig;
 use crate::config::Config;
 use anyhow::{Context, Result, ensure};
+use llama_cpp_4::llama_backend::{LlamaBackend, NumaStrategy};
 use serde::{Deserialize, Serialize};
 use std::{
     num::NonZeroU32,
     path::{self, PathBuf},
+    sync::Arc,
 };
 
 #[derive(Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LlamaCPPConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub context_length: Option<NonZeroU32>,
+    pub context_length: Option<u32>,
     pub max_tokens: NonZeroU32,
     pub verbose: bool,
+    pub numa: NumaConfig,
+    pub context: ContextConfig,
+    pub chat: ChatConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sampling: Option<SamplingConfig>,
     pub models: Vec<LlamaCPPModelConfig>,
 }
 
@@ -23,18 +42,55 @@ impl Default for LlamaCPPConfig {
             context_length: None,
             max_tokens: NonZeroU32::new(256).unwrap(),
             verbose: false,
+            numa: NumaConfig::default(),
+            context: ContextConfig::default(),
+            chat: ChatConfig::default(),
+            sampling: None,
             models: Vec::new(),
         }
     }
 }
 
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct LlamaCPPModelConfig {
-    pub id: String,
-    pub path: PathBuf,
-    #[serde(default)]
-    pub gpu_layers: u32,
+impl LlamaCPPConfig {
+    pub(super) fn resolve_paths(&mut self, config: &Config) {
+        self.chat.resolve_paths(config);
+        for model in &mut self.models {
+            model.resolve_paths(config);
+        }
+    }
+
+    pub(super) fn init_backend(&self) -> Result<Option<Arc<LlamaBackend>>> {
+        if self.models.is_empty() {
+            return Ok(None);
+        }
+        let mut backend = LlamaBackend::init().context("failed to initialize llama.cpp")?;
+        if !self.verbose {
+            backend.void_logs();
+        }
+        if let Some(strategy) = match self.numa {
+            NumaConfig::Disabled => None,
+            NumaConfig::Distribute => Some(NumaStrategy::DISTRIBUTE),
+            NumaConfig::Isolate => Some(NumaStrategy::ISOLATE),
+            NumaConfig::Numactl => Some(NumaStrategy::NUMACTL),
+            NumaConfig::Mirror => Some(NumaStrategy::MIRROR),
+        } {
+            // The dynamic CPU backend must be loaded before initializing NUMA.
+            // The backend guard owns initialization and the strategy is a native enum value.
+            unsafe { llama_cpp_sys_4::llama_numa_init(strategy.into()) };
+        }
+        Ok(Some(Arc::new(backend)))
+    }
+}
+
+#[derive(Clone, Copy, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NumaConfig {
+    #[default]
+    Disabled,
+    Distribute,
+    Isolate,
+    Numactl,
+    Mirror,
 }
 
 /// Optional overrides for the selected llama.cpp model and its inference settings.
@@ -65,7 +121,10 @@ impl LlamaCPPOverrides {
             LlamaCPP::ID
         );
         let mut settings: LlamaCPPConfig = config.provider_settings(LlamaCPP::ID)?;
-        settings.context_length = self.context_length.or(settings.context_length);
+        settings.context_length = self
+            .context_length
+            .map(NonZeroU32::get)
+            .or(settings.context_length);
         settings.max_tokens = self.max_tokens.unwrap_or(settings.max_tokens);
         settings.verbose = self.verbose.unwrap_or(settings.verbose);
 
@@ -80,6 +139,7 @@ impl LlamaCPPOverrides {
                 Some(model) => {
                     if let Some(path) = path {
                         model.path = path;
+                        model.additional_shards.clear();
                     }
                     model.gpu_layers = self.gpu_layers.unwrap_or(model.gpu_layers);
                 }
@@ -89,6 +149,7 @@ impl LlamaCPPOverrides {
                         format!("model '{id}' needs a config entry or --model PATH")
                     })?,
                     gpu_layers: self.gpu_layers.unwrap_or_default(),
+                    ..Default::default()
                 }),
             }
         }
