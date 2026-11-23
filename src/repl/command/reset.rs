@@ -1,4 +1,4 @@
-use super::{Command, CommandContext};
+use super::{Command, RuleContext};
 
 inventory::submit! {
     Command {
@@ -8,7 +8,7 @@ inventory::submit! {
     }
 }
 
-fn reset(context: &mut CommandContext<'_, '_>, prompt: String) -> Option<String> {
+fn reset(context: &mut RuleContext<'_, '_>, prompt: String) -> Option<String> {
     context.clear_history();
     Some(prompt)
 }

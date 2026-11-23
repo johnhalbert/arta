@@ -85,7 +85,9 @@ async fn run_conversation(startup: &'static StartupConfig) -> Result<()> {
     let harness = cli_harness(startup, fullscreen)
         .await
         .context("failed to start the REPL")?;
-    let mut repl = repl::Repl::new(harness.agent("cli", startup.agent_name())?);
+    let mut parser = repl::parser::Parser::default();
+    repl::command::register(&mut parser);
+    let mut repl = repl::Repl::new(harness.agent("cli", startup.agent_name())?, &parser);
     if fullscreen {
         tui::run(&mut repl).await
     } else {

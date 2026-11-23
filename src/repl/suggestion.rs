@@ -23,7 +23,7 @@ pub(crate) fn complete(input: &mut String, cursor: usize, selected: usize) -> Op
 /// Finds commands that match the prefix before the cursor and the token to replace.
 pub(crate) fn matches(input: &str, cursor: usize) -> Option<Suggestions> {
     let prefix = input[..cursor].rsplit(char::is_whitespace).next()?;
-    if !prefix.starts_with('/') {
+    if !prefix.starts_with(command::DELIMITER) {
         return None;
     }
 

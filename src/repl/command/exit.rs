@@ -1,4 +1,4 @@
-use super::{Command, CommandContext};
+use super::{Command, RuleContext};
 
 inventory::submit! {
     Command {
@@ -8,7 +8,7 @@ inventory::submit! {
     }
 }
 
-fn exit(context: &mut CommandContext<'_, '_>, _: String) -> Option<String> {
+fn exit(context: &mut RuleContext<'_, '_>, _: String) -> Option<String> {
     context.exit();
     None
 }

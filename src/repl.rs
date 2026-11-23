@@ -1,5 +1,5 @@
-mod command;
-mod parser;
+pub(super) mod command;
+pub(super) mod parser;
 pub(super) mod suggestion;
 
 use super::markdown::TerminalOutput;
@@ -10,6 +10,7 @@ use arta::{
     stream::{Message, Stream},
 };
 use futures_util::{TryStreamExt, stream};
+use parser::Parser;
 use std::io::IsTerminal;
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -23,20 +24,21 @@ pub(super) struct Submission {
 /// Owns the conversation shared by the terminal and line-based interfaces.
 pub(super) struct Repl<'a> {
     agent: &'a Agent,
+    parser: &'a Parser,
     history: Vec<Turn>,
 }
 
 impl<'a> Repl<'a> {
-    pub(super) fn new(agent: &'a Agent) -> Self {
+    pub(super) fn new(agent: &'a Agent, parser: &'a Parser) -> Self {
         Self {
             agent,
+            parser,
             history: Vec::new(),
         }
     }
 
     pub(super) fn submit(&mut self, input: String) -> Submission {
-        let (prompt, commands) = parser::parse(input);
-        command::execute(self, prompt, commands)
+        self.parser.parse(self, input)
     }
 
     pub(super) fn history(&self) -> &[Turn] {
@@ -184,7 +186,9 @@ mod tests {
     #[tokio::test]
     async fn reset_clears_history_and_keeps_the_system_prompt() -> Result<()> {
         let harness = test_harness()?;
-        let mut repl = Repl::new(harness.agent("cli", "reviewer")?);
+        let mut parser = Parser::default();
+        command::register(&mut parser);
+        let mut repl = Repl::new(harness.agent("cli", "reviewer")?, &parser);
         repl.complete(Turn {
             prompt: "Hello".into(),
             reply: "Hi".into(),
