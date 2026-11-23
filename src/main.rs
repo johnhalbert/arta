@@ -6,6 +6,7 @@ use anyhow::{Context, Result, ensure};
 use arta::{
     config::{self, AgentProfile, StartupConfig},
     harness::Harness,
+    mcp::McpTools,
     model::ModelId,
     provider::llama_cpp::{LlamaCPP, LlamaCPPConfig},
     skill::ActivateSkill,
@@ -18,6 +19,12 @@ use tokio::{
     task::spawn_blocking,
 };
 
+struct Cli {
+    harness: Harness,
+    skills: Option<Arc<ActivateSkill>>,
+    mcp: McpTools,
+}
+
 async fn run_once(startup: &'static StartupConfig, prompt: &str) -> Result<()> {
     let input = if prompt == "-" {
         stdin_message(BufReader::new(io::stdin())).await?
@@ -26,8 +33,9 @@ async fn run_once(startup: &'static StartupConfig, prompt: &str) -> Result<()> {
         Message::new(stream::iter([Ok(prompt.to_owned())]))
     };
 
-    let harness = cli_harness(startup, false).await?;
-    let replies = harness
+    let cli = cli_harness(startup, false).await?;
+    let replies = cli
+        .harness
         .session("cli")?
         .stream(startup.agent_name(), input.into_stream())?;
     write_reply(
@@ -39,9 +47,9 @@ async fn run_once(startup: &'static StartupConfig, prompt: &str) -> Result<()> {
     .await
 }
 
-async fn cli_harness(startup: &'static StartupConfig, fullscreen: bool) -> Result<Harness> {
+async fn cli_harness(startup: &'static StartupConfig, fullscreen: bool) -> Result<Cli> {
     let config = &startup.settings;
-    let mut harness = spawn_blocking(move || -> Result<Harness> {
+    let (mut harness, skills) = spawn_blocking(move || {
         let mut quiet_config;
         let config = if fullscreen {
             // Native diagnostics would write over the alternate screen during inference.
@@ -59,10 +67,11 @@ async fn cli_harness(startup: &'static StartupConfig, fullscreen: bool) -> Resul
             .directories
             .iter()
             .map(|path| config.resolve_path(path));
-        if let Some(tool) = ActivateSkill::discover(directories)? {
-            harness.register_tool(Arc::new(tool))?;
+        let skills = ActivateSkill::discover(directories)?.map(Arc::new);
+        if let Some(tool) = &skills {
+            harness.register_tool(tool.clone())?;
         }
-        Ok(harness)
+        Ok::<_, anyhow::Error>((harness, skills))
     })
     .await
     .context("failed to start the CLI harness")??;
@@ -71,23 +80,35 @@ async fn cli_harness(startup: &'static StartupConfig, fullscreen: bool) -> Resul
         .as_ref()
         .map(AgentProfile::options)
         .unwrap_or_default();
-    harness.connect_mcp_in(config, options.workspace).await?;
+    let mcp = harness
+        .connect_mcp_tools_in(config, options.workspace)
+        .await?;
     let model_id = ModelId {
         provider: &config.app.provider,
         model: &config.app.model,
     };
     harness.create_session_with_agents("cli", [(startup.agent_name(), model_id, options)])?;
-    Ok(harness)
+    Ok(Cli {
+        harness,
+        skills,
+        mcp,
+    })
 }
 
 async fn run_conversation(startup: &'static StartupConfig) -> Result<()> {
     let fullscreen = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
-    let harness = cli_harness(startup, fullscreen)
+    let cli = cli_harness(startup, fullscreen)
         .await
         .context("failed to start the REPL")?;
     let mut parser = repl::parser::Parser::default();
     repl::command::register(&mut parser);
-    let mut repl = repl::Repl::new(harness.agent("cli", startup.agent_name())?, &parser);
+    let skills = repl::skill::register(&mut parser, cli.skills);
+    repl::mcp::register(&mut parser, cli.mcp);
+    let mut repl = repl::Repl::new(
+        cli.harness.agent("cli", startup.agent_name())?,
+        &parser,
+        skills,
+    );
     if fullscreen {
         tui::run(&mut repl).await
     } else {

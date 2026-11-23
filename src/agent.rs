@@ -2,7 +2,7 @@ use crate::{
     model::Model,
     provider::{Provider, Turn, tool},
     stream::Message,
-    tool::Tools,
+    tool::{Tool, Tools},
 };
 use anyhow::Result;
 use std::{
@@ -64,13 +64,45 @@ impl Agent {
 
     /// Run a prompt with conversation history supplied by the caller.
     pub async fn chat(&self, history: &[Turn], prompt: &str) -> Result<Message> {
+        self.chat_with_tools(history, prompt, self.system_prompt.as_deref(), &self.tools)
+            .await
+    }
+
+    /// Run a turn with the supplied tools and optional instructions appended to the agent's system prompt.
+    pub async fn chat_with_context(
+        &self,
+        history: &[Turn],
+        prompt: &str,
+        instructions: &str,
+        tools: impl IntoIterator<Item = Arc<dyn Tool>>,
+    ) -> Result<Message> {
+        let system_prompt = match self.system_prompt.as_deref() {
+            base if instructions.is_empty() => base.map(std::borrow::Cow::Borrowed),
+            Some(base) => Some(format!("{base}\n\n{instructions}").into()),
+            None => Some(instructions.into()),
+        };
+        let mut selected = Tools::default();
+        for tool in tools {
+            selected.register(tool)?;
+        }
+        self.chat_with_tools(history, prompt, system_prompt.as_deref(), &selected)
+            .await
+    }
+
+    async fn chat_with_tools(
+        &self,
+        history: &[Turn],
+        prompt: &str,
+        system_prompt: Option<&str>,
+        tools: &Tools,
+    ) -> Result<Message> {
         tool::chat(
             self.provider(),
             self.model.id(),
-            self.system_prompt.as_deref(),
+            system_prompt,
             history,
             prompt,
-            &self.tools,
+            tools,
         )
         .await
     }

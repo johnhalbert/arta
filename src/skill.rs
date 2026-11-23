@@ -12,6 +12,7 @@ use std::{
     fs,
     io::ErrorKind,
     path::PathBuf,
+    sync::Arc,
 };
 
 #[derive(Clone, Default, Deserialize)]
@@ -29,7 +30,12 @@ struct FrontMatter {
 /// Advertises available skills and returns their Markdown instructions on demand.
 pub struct ActivateSkill {
     spec: ToolSpec,
-    instructions: BTreeMap<String, String>,
+    skills: BTreeMap<String, Arc<Skill>>,
+}
+
+struct Skill {
+    description: String,
+    instructions: String,
 }
 
 impl ActivateSkill {
@@ -56,7 +62,10 @@ impl ActivateSkill {
                     .with_context(|| format!("invalid skill '{}'", path.display()))?;
                 match skills.entry(metadata.name) {
                     Entry::Vacant(entry) => {
-                        entry.insert((metadata.description, body.to_owned()));
+                        entry.insert(Arc::new(Skill {
+                            description: metadata.description,
+                            instructions: body.to_owned(),
+                        }));
                     }
                     Entry::Occupied(entry) => {
                         bail!("duplicate skill '{}' in '{}'", entry.key(), path.display());
@@ -64,6 +73,33 @@ impl ActivateSkill {
                 }
             }
         }
+        Self::with_skills(skills)
+    }
+
+    pub fn catalog(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.skills
+            .iter()
+            .map(|(name, skill)| (name.as_str(), skill.description.trim()))
+    }
+
+    pub fn instructions(&self, name: &str) -> Option<&str> {
+        self.skills
+            .get(name)
+            .map(|skill| skill.instructions.as_str())
+    }
+
+    /// Builds an activation tool for skills whose instructions are still needed.
+    pub fn excluding(&self, active: impl Fn(&str) -> bool) -> Result<Option<Self>> {
+        Self::with_skills(
+            self.skills
+                .iter()
+                .filter(|(name, _)| !active(name))
+                .map(|(name, skill)| (name.clone(), Arc::clone(skill)))
+                .collect(),
+        )
+    }
+
+    fn with_skills(skills: BTreeMap<String, Arc<Skill>>) -> Result<Option<Self>> {
         if skills.is_empty() {
             return Ok(None);
         }
@@ -71,8 +107,8 @@ impl ActivateSkill {
         let mut description = String::from(
             "Load a skill's instructions. When a task matches a skill below, call this tool with its name before proceeding.\n\nAvailable skills:\n",
         );
-        for (name, (summary, _)) in &skills {
-            writeln!(description, "- {name}: {}", summary.trim())?;
+        for (name, skill) in &skills {
+            writeln!(description, "- {name}: {}", skill.description.trim())?;
         }
         let spec = ToolSpec {
             name: "activate_skill".into(),
@@ -86,11 +122,7 @@ impl ActivateSkill {
                 "additionalProperties": false
             }))?,
         };
-        let instructions = skills
-            .into_iter()
-            .map(|(name, (_, body))| (name, body))
-            .collect();
-        Ok(Some(Self { spec, instructions }))
+        Ok(Some(Self { spec, skills }))
     }
 }
 
@@ -104,8 +136,8 @@ impl Tool for ActivateSkill {
             let Some(name) = arguments.get("name").and_then(Value::as_str) else {
                 return Ok(ToolOutput::error("Specify the skill name as a string."));
             };
-            Ok(match self.instructions.get(name) {
-                Some(body) => ToolOutput::success(body.clone()),
+            Ok(match self.instructions(name) {
+                Some(body) => ToolOutput::success(body),
                 None => ToolOutput::error(format!("Unknown skill '{name}'")),
             })
         })

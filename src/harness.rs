@@ -1,6 +1,7 @@
 use crate::{
     agent::{Agent, AgentOptions},
     config::Config,
+    mcp::McpTools,
     model::{Model, ModelId},
     provider::{Provider, registry::ProviderRegistry, tool},
     session::Session,
@@ -92,16 +93,26 @@ impl Harness {
         config: &Config,
         workspace: Option<&Path>,
     ) -> Result<()> {
-        if !config.mcp.servers.is_empty() {
-            let mut tools = (*self.tools).clone();
-            let directory = config.resolve_path(Path::new("."));
-            config
-                .mcp
-                .register(&directory, workspace.unwrap_or(&directory), &mut tools)
-                .await?;
-            self.tools = Arc::new(tools);
+        self.connect_mcp_tools_in(config, workspace).await.map(drop)
+    }
+
+    /// Connect configured MCP servers and return their tools grouped by server name.
+    pub async fn connect_mcp_tools_in(
+        &mut self,
+        config: &Config,
+        workspace: Option<&Path>,
+    ) -> Result<McpTools> {
+        if config.mcp.servers.is_empty() {
+            return Ok(McpTools::default());
         }
-        Ok(())
+        let mut tools = (*self.tools).clone();
+        let directory = config.resolve_path(Path::new("."));
+        let servers = config
+            .mcp
+            .register(&directory, workspace.unwrap_or(&directory), &mut tools)
+            .await?;
+        self.tools = Arc::new(tools);
+        Ok(servers)
     }
 
     /// Create a session with at least one named agent and bind each agent to a model.

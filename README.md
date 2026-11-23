@@ -60,9 +60,11 @@ Set up `config.toml` in your working directory, then run `arta` with no argument
 
 The full-screen view has two empty panes across the top and a conversation in the bottom half. Press Enter to send a prompt. Animated dots appear below Arta's name until the reply starts streaming. The conversation renders Markdown in replies as they arrive, including headings, emphasis, lists, links, code blocks, and tables. Use Page Up and Page Down to read earlier turns, or Ctrl+End to return to the latest reply.
 
-Type `/` at the start of a word to see matching commands. Use the Up and Down arrow keys to select a command, Tab to complete it, and Enter to submit. Use `/reset` to clear conversation history and `/exit` or Ctrl+C to quit.
+Type `/`, `$`, or `@` at the start of a word to see matching commands, skills, or MCP servers. Use the Up and Down arrow keys to select a suggestion, Tab to complete it, and Enter to submit. Use `/reset` to clear conversation history and active mentions, and `/exit` or Ctrl+C to quit.
 
 Separate slash commands from other text with whitespace. On submission, commands run from left to right and the REPL sends any remaining prompt text to the model. For example, `/reset Explain gravity` clears the conversation before sending `Explain gravity`. If the prompt contains `/exit`, the REPL exits after processing the commands.
+
+Use `$skill-name` to load a configured skill's instructions and `@server-name` to expose a configured MCP server's tools. Mentions work alongside a prompt or on their own and stay active until `/reset`. Repeating a mention reuses the active skill or tools.
 
 With redirected input or output, `arta` reads one prompt per line and writes replies to standard output. It formats each complete reply when standard output is a terminal and streams the original Markdown when standard output is redirected. `/reset`, `/exit`, and end-of-input work in this mode.
 
@@ -94,7 +96,7 @@ Relative `workspace` and `model_path` values start from the Markdown file's dire
 
 Configure MCP servers under `[mcp.servers]` to make their tools available in one-shot prompts and interactive conversations. For a local stdio server, set `command` and optional `args` and `env`. The process starts in the selected agent's workspace or defaults to the config file's directory. For a Streamable HTTP server, set `url` and optionally set `bearer_token_env` to the name of an environment variable containing its bearer token. See `config.example.toml` for both forms.
 
-Arta discovers tools at startup and exposes them as `server__tool` names, with periods replaced by underscores. Set `tools` on a server to list the original names to expose. Omitting it exposes every tool the server advertises. The model can invoke exposed tools automatically, so configure servers and tools you trust to run.
+Arta discovers tools at startup and exposes them as `server__tool` names, with periods replaced by underscores. One-shot prompts can use tools from all configured servers. In a REPL conversation, use `@server-name` to expose that server's tools. Set `tools` on a server to list the original names to expose. Omitting it exposes every tool the server advertises. The model can invoke exposed tools automatically, so configure servers and tools you trust to run.
 
 The llama.cpp model needs a chat template that supports tool calls. Arta runs up to eight calls per prompt and feeds text or structured JSON results back into the model. Tool schemas and results count toward the context limit. Each inference step has its own `max_tokens` budget. With tools enabled, Arta buffers inference steps and displays the final reply when it is ready.
 
@@ -111,7 +113,7 @@ directories = [".agents/skills"]
 
 Place each skill in its own subdirectory, such as `.agents/skills/review-notes/SKILL.md`. Each file starts with YAML front matter that provides `name` and `description`, followed by Markdown instructions. Use unique names across the configured directories.
 
-When Arta finds skills at startup, it advertises their names and descriptions in the `activate_skill` tool. When the model selects a skill by name, the tool returns the Markdown body. Skill activation uses a model with tool-call support, and the model can activate the skill again on later turns.
+When Arta finds skills at startup, it advertises their names and descriptions in the `activate_skill` tool. When the model selects a skill by name, the tool returns the Markdown body. In a REPL conversation, `$skill-name` adds the instructions directly to the agent's context and removes that skill from the activation tool's catalog for the conversation.
 
 ## One-shot input and output
 

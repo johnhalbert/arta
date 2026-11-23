@@ -1,5 +1,7 @@
 pub(super) mod command;
+pub(super) mod mcp;
 pub(super) mod parser;
+pub(super) mod skill;
 pub(super) mod suggestion;
 
 use super::markdown::TerminalOutput;
@@ -8,10 +10,11 @@ use arta::{
     agent::Agent,
     provider::Turn,
     stream::{Message, Stream},
+    tool::Tool,
 };
 use futures_util::{TryStreamExt, stream};
 use parser::Parser;
-use std::io::IsTerminal;
+use std::{collections::BTreeMap, io::IsTerminal, sync::Arc};
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 #[derive(Default)]
@@ -26,19 +29,27 @@ pub(super) struct Repl<'a> {
     agent: &'a Agent,
     parser: &'a Parser,
     history: Vec<Turn>,
+    skills: skill::Skills,
+    mcp_tools: BTreeMap<String, Arc<dyn Tool>>,
 }
 
 impl<'a> Repl<'a> {
-    pub(super) fn new(agent: &'a Agent, parser: &'a Parser) -> Self {
+    pub(super) fn new(agent: &'a Agent, parser: &'a Parser, skills: skill::Skills) -> Self {
         Self {
             agent,
             parser,
             history: Vec::new(),
+            skills,
+            mcp_tools: BTreeMap::new(),
         }
     }
 
     pub(super) fn submit(&mut self, input: String) -> Submission {
         self.parser.parse(self, input)
+    }
+
+    pub(super) fn parser(&self) -> &'a Parser {
+        self.parser
     }
 
     pub(super) fn history(&self) -> &[Turn] {
@@ -48,8 +59,14 @@ impl<'a> Repl<'a> {
     pub(super) fn reply<'b>(&'b self, prompt: &'b str) -> Stream<'b> {
         Stream::new(
             stream::once(async {
+                let instructions = self.skills.instructions();
+                let tools = self
+                    .skills
+                    .activation_tool()?
+                    .into_iter()
+                    .chain(self.mcp_tools.values().cloned());
                 self.agent
-                    .chat(&self.history, prompt)
+                    .chat_with_context(&self.history, prompt, &instructions, tools)
                     .await
                     .map(Message::into_stream)
             })
@@ -123,11 +140,16 @@ mod tests {
         config::Config,
         harness::Harness,
         model::{Model, ModelId},
-        provider::Provider,
+        provider::{
+            Provider,
+            tool::{ToolAdapter, ToolRequest, ToolResponse},
+        },
+        skill::ActivateSkill,
         stream::Frame,
+        tool::{ToolArguments, ToolOutput, ToolSpec},
     };
     use futures_util::future::BoxFuture;
-    use std::sync::Arc;
+    use std::path::PathBuf;
 
     struct TestProvider;
 
@@ -150,6 +172,10 @@ mod tests {
             Box::pin(async { anyhow::bail!("expected the agent's system prompt") })
         }
 
+        fn tool_adapter(&self) -> Option<&dyn ToolAdapter> {
+            Some(self)
+        }
+
         fn chat_with_system<'a>(
             &'a self,
             _: &'a str,
@@ -160,6 +186,36 @@ mod tests {
             assert_eq!(system_prompt, Some("Use short answers."));
             let reply = history.len().to_string();
             Box::pin(async { Ok(Message::new(stream::iter([Ok(reply)]))) })
+        }
+    }
+
+    impl ToolAdapter for TestProvider {
+        fn infer<'a>(&'a self, request: ToolRequest<'a>) -> BoxFuture<'a, Result<ToolResponse>> {
+            Box::pin(async move {
+                let tools: Vec<_> = request
+                    .tools
+                    .iter()
+                    .map(|tool| tool.name.as_str())
+                    .collect();
+                Ok(ToolResponse::Reply(format!(
+                    "{}\n{}\n{}",
+                    request.prompt,
+                    request.system_prompt.unwrap_or_default().trim_end(),
+                    tools.join(","),
+                )))
+            })
+        }
+    }
+
+    struct TestMcpTool(ToolSpec);
+
+    impl Tool for TestMcpTool {
+        fn spec(&self) -> &ToolSpec {
+            &self.0
+        }
+
+        fn call(&self, _: ToolArguments) -> BoxFuture<'_, Result<ToolOutput>> {
+            Box::pin(async { anyhow::bail!("the test only checks tool exposure") })
         }
     }
 
@@ -188,7 +244,11 @@ mod tests {
         let harness = test_harness()?;
         let mut parser = Parser::default();
         command::register(&mut parser);
-        let mut repl = Repl::new(harness.agent("cli", "reviewer")?, &parser);
+        let mut repl = Repl::new(
+            harness.agent("cli", "reviewer")?,
+            &parser,
+            Default::default(),
+        );
         repl.complete(Turn {
             prompt: "Hello".into(),
             reply: "Hi".into(),
@@ -218,6 +278,73 @@ mod tests {
         assert!(exit.prompt.is_none());
         assert!(exit.history_cleared);
         assert!(repl.history().is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn mentions_complete_and_add_conversation_context_once() -> Result<()> {
+        let harness = test_harness()?;
+        let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/skills");
+        let mut parser = Parser::default();
+        command::register(&mut parser);
+        let skills = skill::register(
+            &mut parser,
+            ActivateSkill::discover([directory])?.map(Arc::new),
+        );
+        let server = |name: &str| -> Vec<Arc<dyn Tool>> {
+            vec![Arc::new(TestMcpTool(ToolSpec {
+                name: format!("{name}__lookup"),
+                description: "Look up notes".into(),
+                input_schema: Default::default(),
+            }))]
+        };
+        mcp::register(
+            &mut parser,
+            BTreeMap::from([
+                ("notes".into(), server("notes")),
+                ("other".into(), server("other")),
+            ]),
+        );
+
+        let candidates: Vec<_> = parser.suggestions().collect();
+        for (prefix, expected) in [("$rev", "Use $review-notes "), ("@no", "Use @notes ")] {
+            let mut input = format!("Use {prefix}");
+            let cursor = input.len();
+            assert_eq!(
+                suggestion::complete(&candidates, &mut input, cursor, 0),
+                Some(expected.len())
+            );
+            assert_eq!(input, expected);
+        }
+
+        let mut repl = Repl::new(harness.agent("cli", "reviewer")?, &parser, skills);
+        let plain = repl.reply("Hello").try_collect::<Vec<_>>().await?;
+        assert_eq!(
+            plain,
+            vec![
+                Frame::Begin,
+                Frame::Chunk("Hello\nUse short answers.\nactivate_skill".into()),
+                Frame::End
+            ]
+        );
+
+        assert!(repl.submit("$review-notes @notes".into()).prompt.is_none());
+        for input in [
+            "Check notes",
+            "$review-notes Check notes @notes @notes $review-notes",
+            "Check notes $review-notes @notes",
+        ] {
+            let submission = repl.submit(input.into());
+            let prompt = submission.prompt.as_deref().unwrap();
+            assert_eq!(prompt, "Check notes");
+            let reply = repl.reply(prompt).try_collect::<Vec<_>>().await?;
+            assert_eq!(reply, vec![Frame::Begin, Frame::Chunk(
+                "Check notes\nUse short answers.\n\n## Skill review-notes\n\nCompare each claim with the source notes.\nnotes__lookup".into()
+            ), Frame::End]);
+        }
+
+        assert!(repl.submit("/reset".into()).history_cleared);
+        assert_eq!(repl.reply("Hello").try_collect::<Vec<_>>().await?, plain);
         Ok(())
     }
 }

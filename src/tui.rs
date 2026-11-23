@@ -1,6 +1,6 @@
 use super::{
     markdown,
-    repl::{Repl, suggestion},
+    repl::{Repl, parser::Parser, suggestion},
 };
 use anyhow::Result;
 use arta::{provider::Turn, stream::Frame as ReplyFrame};
@@ -34,7 +34,7 @@ const BUSY_FRAMES: [&str; 6] = [".", "..", "...", " ..", "  .", ""];
 pub(super) async fn run(repl: &mut Repl<'_>) -> Result<()> {
     let mut screen = Screen::enter()?;
     let mut events = EventStream::new();
-    let mut tui = Tui::default();
+    let mut tui = Tui::new(repl.parser());
 
     loop {
         screen.draw(|frame| tui.render(frame, repl.history(), None))?;
@@ -109,8 +109,8 @@ enum InputEvent {
 }
 
 #[derive(Default)]
-struct Tui {
-    input: Editor,
+struct Tui<'a> {
+    input: Editor<'a>,
     /// A fixed top row while reading back. None follows the newest text.
     scroll: Option<u16>,
     latest: u16,
@@ -119,7 +119,17 @@ struct Tui {
     failure: Option<(Turn, String)>,
 }
 
-impl Tui {
+impl<'a> Tui<'a> {
+    fn new(parser: &'a Parser) -> Self {
+        Self {
+            input: Editor {
+                candidates: parser.suggestions().collect(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
     fn handle(&mut self, event: Event) -> InputEvent {
         match event {
             Event::Paste(text) => {
@@ -267,21 +277,21 @@ impl Tui {
         let menu_visible = suggestions.is_some();
         if let Some(suggestions) = suggestions {
             let height = suggestions
-                .commands
+                .candidates
                 .len()
                 .min(usize::from(transcript.height));
             let first = self.input.selected.saturating_sub(height - 1);
             let options: Vec<_> = suggestions
-                .commands
+                .candidates
                 .iter()
                 .enumerate()
                 .skip(first)
                 .take(height)
-                .map(|(index, command)| {
+                .map(|(index, candidate)| {
                     let line = Line::from(vec![
-                        command.name.cyan().bold(),
+                        candidate.name.as_str().cyan().bold(),
                         "  ".into(),
-                        command.description.into(),
+                        markdown::clean_terminal_text(&candidate.description).into(),
                     ]);
                     if index == self.input.selected {
                         line.reversed()
@@ -317,7 +327,7 @@ impl Tui {
             } else if pending.is_some() {
                 " PgUp/PgDn scroll · Ctrl+C exit "
             } else {
-                " Enter send · PgUp/PgDn scroll · / commands "
+                " Enter send · PgUp/PgDn scroll · / $ @ "
             };
             let block = Block::bordered()
                 .border_type(BorderType::Rounded)
@@ -369,13 +379,14 @@ fn display_lines(text: &str) -> impl Iterator<Item = Line<'_>> {
 }
 
 #[derive(Default)]
-struct Editor {
+struct Editor<'a> {
     text: String,
     cursor: usize,
     selected: usize,
+    candidates: Vec<&'a suggestion::Candidate>,
 }
 
-impl Editor {
+impl<'a> Editor<'a> {
     fn take(&mut self) -> String {
         self.cursor = 0;
         self.selected = 0;
@@ -395,8 +406,8 @@ impl Editor {
             .unwrap_or(self.text.len())
     }
 
-    fn suggestions(&self) -> Option<suggestion::Suggestions> {
-        suggestion::matches(&self.text, self.cursor)
+    fn suggestions(&self) -> Option<suggestion::Suggestions<'a>> {
+        suggestion::matches(&self.candidates, &self.text, self.cursor)
     }
 
     fn edit(&mut self, code: KeyCode) {
@@ -406,15 +417,18 @@ impl Editor {
                     self.selected = if code == KeyCode::Up {
                         self.selected.saturating_sub(1)
                     } else {
-                        (self.selected + 1).min(suggestions.commands.len() - 1)
+                        (self.selected + 1).min(suggestions.candidates.len() - 1)
                     };
                 }
                 return;
             }
             KeyCode::Tab => {
-                if let Some(cursor) =
-                    suggestion::complete(&mut self.text, self.cursor, self.selected)
-                {
+                if let Some(cursor) = suggestion::complete(
+                    &self.candidates,
+                    &mut self.text,
+                    self.cursor,
+                    self.selected,
+                ) {
                     self.cursor = self.boundary_at_or_after(cursor);
                 }
             }
@@ -567,8 +581,10 @@ mod tests {
 
     #[test]
     fn slash_suggestions_render_and_complete_from_the_keyboard() -> Result<()> {
+        let mut parser = Parser::default();
+        crate::repl::command::register(&mut parser);
         let mut terminal = Terminal::new(TestBackend::new(60, 24))?;
-        let mut tui = Tui::default();
+        let mut tui = Tui::new(&parser);
         let history = [Turn {
             prompt: "Earlier prompt".into(),
             reply: "First  \n**xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx**  \nLast".into(),

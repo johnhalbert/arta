@@ -1,13 +1,45 @@
+use super::suggestion::Candidate;
 use super::{Repl, Submission};
+use arta::tool::Tool;
+use std::sync::Arc;
 
 /// Receives the prompt with matched tokens removed and any earlier edits applied.
 /// Returning `None` consumes the prompt. Later handlers receive an empty string.
-pub(super) type Handler = fn(&mut RuleContext<'_, '_>, String) -> Option<String>;
+type Handler = dyn Fn(&mut RuleContext<'_, '_>, String) -> Option<String> + Send + Sync;
 
 pub(super) struct Rule {
-    pub(super) delimiter: char,
-    pub(super) matcher: Box<dyn Fn(&str) -> bool + Send + Sync>,
-    pub(super) handler: Handler,
+    delimiter: char,
+    matcher: Box<dyn Fn(&str) -> bool + Send + Sync>,
+    handler: Box<Handler>,
+    suggestion: Option<Candidate>,
+}
+
+impl Rule {
+    pub(super) fn new(
+        delimiter: char,
+        matcher: impl Fn(&str) -> bool + Send + Sync + 'static,
+        handler: impl Fn(&mut RuleContext<'_, '_>, String) -> Option<String> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            delimiter,
+            matcher: Box::new(matcher),
+            handler: Box::new(handler),
+            suggestion: None,
+        }
+    }
+
+    pub(super) fn named(
+        delimiter: char,
+        name: String,
+        description: String,
+        handler: impl Fn(&mut RuleContext<'_, '_>, String) -> Option<String> + Send + Sync + 'static,
+    ) -> Self {
+        let token = name.clone();
+        Self {
+            suggestion: Some(Candidate { name, description }),
+            ..Self::new(delimiter, move |input| input == token, handler)
+        }
+    }
 }
 
 #[derive(Default)]
@@ -19,6 +51,12 @@ impl Parser {
     /// Registers a rule. If multiple rules match a token, the first registered rule wins.
     pub(super) fn register(&mut self, rule: Rule) {
         self.rules.push(rule);
+    }
+
+    pub(crate) fn suggestions(&self) -> impl Iterator<Item = &Candidate> {
+        self.rules
+            .iter()
+            .filter_map(|rule| rule.suggestion.as_ref())
     }
 
     /// Matches whitespace-delimited tokens and applies their handlers in prompt order.
@@ -36,7 +74,7 @@ impl Parser {
                 .iter()
                 .find(|rule| token.starts_with(rule.delimiter) && (rule.matcher)(token))
             {
-                matches.push(rule.handler);
+                matches.push(rule.handler.as_ref());
                 prompt.push_str(&input[copied..start]);
                 copied = offset;
             }
@@ -70,7 +108,22 @@ pub(super) struct RuleContext<'repl, 'agent> {
 impl RuleContext<'_, '_> {
     pub(super) fn clear_history(&mut self) {
         self.repl.history.clear();
+        self.repl.skills.clear();
+        self.repl.mcp_tools.clear();
         self.submission.history_cleared = true;
+    }
+
+    pub(super) fn activate_skill(&mut self, name: &str) {
+        self.repl.skills.activate(name);
+    }
+
+    pub(super) fn expose_mcp_tools(&mut self, tools: &[Arc<dyn Tool>]) {
+        for tool in tools {
+            self.repl
+                .mcp_tools
+                .entry(tool.spec().name.clone())
+                .or_insert_with(|| Arc::clone(tool));
+        }
     }
 
     pub(super) fn exit(&mut self) {
@@ -88,7 +141,11 @@ mod tests {
         let harness = test_harness()?;
         let mut parser = Parser::default();
         command::register(&mut parser);
-        let mut repl = Repl::new(harness.agent("cli", "reviewer")?, &parser);
+        let mut repl = Repl::new(
+            harness.agent("cli", "reviewer")?,
+            &parser,
+            Default::default(),
+        );
 
         let ordinary = "  /resetting path/exit /exit/path /reset. /unknown  ";
         let submission = repl.submit(ordinary.into());
@@ -105,31 +162,35 @@ mod tests {
     fn handlers_for_multiple_delimiters_run_in_source_order() -> anyhow::Result<()> {
         let harness = test_harness()?;
         let mut parser = Parser::default();
-        parser.register(Rule {
-            delimiter: '@',
-            matcher: Box::new(|token| token == "@uppercase"),
-            handler: |_, prompt| {
+        parser.register(Rule::new(
+            '@',
+            |token| token == "@uppercase",
+            |_, prompt| {
                 assert_eq!(prompt, "Hello!");
                 Some(prompt.to_uppercase())
             },
-        });
-        parser.register(Rule {
-            delimiter: '!',
-            matcher: Box::new(|token| token == "!append"),
-            handler: |_, mut prompt| {
+        ));
+        parser.register(Rule::new(
+            '!',
+            |token| token == "!append",
+            |_, mut prompt| {
                 prompt.push('!');
                 Some(prompt)
             },
-        });
-        parser.register(Rule {
-            delimiter: '!',
-            matcher: Box::new(|token| token == "!consume"),
-            handler: |_, prompt| {
+        ));
+        parser.register(Rule::new(
+            '!',
+            |token| token == "!consume",
+            |_, prompt| {
                 assert_eq!(prompt, "HELLO!");
                 None
             },
-        });
-        let mut repl = Repl::new(harness.agent("cli", "reviewer")?, &parser);
+        ));
+        let mut repl = Repl::new(
+            harness.agent("cli", "reviewer")?,
+            &parser,
+            Default::default(),
+        );
 
         let submission = repl.submit("!append Hello @uppercase".into());
         assert_eq!(submission.prompt.as_deref(), Some("HELLO!"));

@@ -28,23 +28,27 @@ pub struct McpConfig {
     pub servers: BTreeMap<String, McpServerConfig>,
 }
 
+pub type McpTools = BTreeMap<String, Vec<Arc<dyn Tool>>>;
+
 impl McpConfig {
     pub(crate) async fn register(
         &self,
         directory: &Path,
         workspace: &Path,
         tools: &mut Tools,
-    ) -> Result<()> {
+    ) -> Result<McpTools> {
+        let mut servers = BTreeMap::new();
         for (name, server) in &self.servers {
             let discovered = server
                 .connect_in(name, directory, workspace)
                 .await
                 .with_context(|| format!("failed to connect to MCP server '{name}'"))?;
-            for tool in discovered {
-                tools.register(tool)?;
+            for tool in &discovered {
+                tools.register(Arc::clone(tool))?;
             }
+            servers.insert(name.clone(), discovered);
         }
-        Ok(())
+        Ok(servers)
     }
 }
 
