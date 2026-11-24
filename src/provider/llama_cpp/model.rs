@@ -126,13 +126,23 @@ pub(super) fn chat_messages(
     history: &[Turn],
     prompt: &str,
 ) -> Vec<Value> {
+    chat_messages_with(system_prompt, history, prompt, |_, _| {})
+}
+
+pub(super) fn chat_messages_with(
+    system_prompt: Option<&str>,
+    history: &[Turn],
+    prompt: &str,
+    mut add_exchanges: impl FnMut(usize, &mut Vec<Value>),
+) -> Vec<Value> {
     let mut messages =
         Vec::with_capacity(history.len() * 2 + 1 + usize::from(system_prompt.is_some()));
     if let Some(content) = system_prompt {
         messages.push(json!({ "role": "system", "content": content }));
     }
-    for turn in history {
+    for (index, turn) in history.iter().enumerate() {
         messages.push(json!({ "role": "user", "content": turn.prompt }));
+        add_exchanges(index, &mut messages);
         messages.push(json!({ "role": "assistant", "content": turn.reply }));
     }
     messages.push(json!({ "role": "user", "content": prompt }));

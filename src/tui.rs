@@ -1,9 +1,17 @@
+mod workflow;
+
+use self::workflow::{WorkflowPane, WorkflowTranscript};
 use super::{
     markdown,
     repl::{Repl, parser::Parser, suggestion},
 };
 use anyhow::Result;
-use arta::{provider::Turn, stream::Frame as ReplyFrame};
+use arta::{
+    config::Config,
+    provider::Turn,
+    stream::Frame as ReplyFrame,
+    workflow::{Workflow, WorkflowEvent},
+};
 use crossterm::{
     cursor::Show,
     event::{
@@ -35,7 +43,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 const BUSY_FRAMES: [&str; 6] = [".", "..", "...", " ..", "  .", ""];
 
-pub(super) async fn run(repl: &mut Repl<'_>) -> Result<()> {
+pub(super) async fn run(repl: &mut Repl<'_>, config: &Config) -> Result<()> {
     let mut screen = Screen::enter()?;
     let mut events = EventStream::new();
     let mut tui = Tui::new(repl.parser());
@@ -57,6 +65,8 @@ pub(super) async fn run(repl: &mut Repl<'_>) -> Result<()> {
                     tui.failure = None;
                     tui.scroll = None;
                     tui.model_inputs = ModelInputs::default();
+                    tui.workflow = None;
+                    tui.workflow_history.clear();
                 }
                 if !submission.model_requests.is_empty() {
                     tui.failure = None;
@@ -74,10 +84,26 @@ pub(super) async fn run(repl: &mut Repl<'_>) -> Result<()> {
                         continue;
                     }
                 };
-                if let Some(prompt) = submission.prompt
-                    && !tui.respond(repl, prompt, &mut events, &mut screen).await?
-                {
-                    break;
+                if let Some(request) = submission.workflow_request {
+                    match repl.select_workflow(config, request.as_deref(), true) {
+                        Ok(workflow) => tui.workflow = Some(WorkflowPane::new(workflow)),
+                        Err(error) => {
+                            tui.model_status = Some(Err(format!("{error:#}")));
+                            continue;
+                        }
+                    }
+                }
+                if let Some(prompt) = submission.prompt {
+                    let keep_running = match repl.take_workflow() {
+                        Some(workflow) => {
+                            tui.respond_workflow(repl, workflow, prompt, &mut events, &mut screen)
+                                .await?
+                        }
+                        None => tui.respond(repl, prompt, &mut events, &mut screen).await?,
+                    };
+                    if !keep_running {
+                        break;
+                    }
                 }
             }
         }
@@ -140,6 +166,8 @@ struct Tui<'a> {
     busy_frame: usize,
     failure: Option<(Turn, String)>,
     model_status: Option<Result<String, String>>,
+    workflow: Option<WorkflowPane>,
+    workflow_history: Vec<WorkflowTranscript>,
 }
 
 impl<'a> Tui<'a> {
@@ -179,6 +207,11 @@ impl<'a> Tui<'a> {
                             return InputEvent::Quit;
                         }
                         KeyCode::End => self.scroll = None,
+                        KeyCode::PageUp | KeyCode::PageDown => {
+                            if let Some(workflow) = &mut self.workflow {
+                                workflow.page(key.code == KeyCode::PageDown);
+                            }
+                        }
                         _ => {}
                     }
                 } else {
@@ -216,6 +249,110 @@ impl<'a> Tui<'a> {
             _ => {}
         }
         InputEvent::Continue
+    }
+
+    async fn respond_workflow(
+        &mut self,
+        repl: &mut Repl<'_>,
+        workflow: Workflow,
+        prompt: String,
+        events: &mut EventStream,
+        screen: &mut Screen,
+    ) -> Result<bool> {
+        self.scroll = None;
+        self.failure = None;
+        self.busy_frame = 0;
+        self.model_inputs = ModelInputs::default();
+        self.workflow.insert(WorkflowPane::new(&workflow)).start();
+        let (history, mut replies) = repl.workflow_events(&workflow, &prompt, true);
+        self.workflow_history
+            .push(WorkflowTranscript::new(history.len(), prompt.clone()));
+        screen.draw(|frame| self.render(frame, history, None))?;
+        let started = Instant::now();
+        let mut refresh = interval(Duration::from_millis(33));
+        refresh.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let mut dirty = false;
+        let error = loop {
+            tokio::select! {
+                event = events.next() => {
+                    let Some(event) = event.transpose()? else { return Ok(false) };
+                    if matches!(self.handle(event), InputEvent::Quit) { return Ok(false); }
+                    screen.draw(|frame| self.render(frame, history, None))?;
+                    dirty = false;
+                }
+                event = replies.next() => match event {
+                    Some(Ok(event)) => {
+                        let output = matches!(event, WorkflowEvent::Output(_));
+                        self.workflow_event(event);
+                        if output {
+                            dirty = true;
+                        } else {
+                            screen.draw(|frame| self.render(frame, history, None))?;
+                            dirty = false;
+                        }
+                    }
+                    Some(Err(error)) => break Some(format!("{error:#}")),
+                    None => break None,
+                },
+                _ = refresh.tick() => {
+                    let next = (started.elapsed().as_millis() / 120 % BUSY_FRAMES.len() as u128) as usize;
+                    let waiting = self.workflow_history.last().is_some_and(|turn| turn.waiting);
+                    if dirty || (waiting && next != self.busy_frame) {
+                        self.busy_frame = next;
+                        screen.draw(|frame| self.render(frame, history, None))?;
+                        dirty = false;
+                    }
+                }
+            }
+        };
+        if let Some(workflow) = &mut self.workflow {
+            workflow.finish(error.is_none());
+        }
+        if let Some(transcript) = self.workflow_history.last_mut() {
+            transcript.waiting = false;
+            transcript.error = error;
+        }
+        Ok(true)
+    }
+
+    fn workflow_event(&mut self, event: WorkflowEvent) {
+        let (Some(workflow), Some(transcript)) =
+            (&mut self.workflow, self.workflow_history.last_mut())
+        else {
+            return;
+        };
+        match event {
+            WorkflowEvent::NodeStarted { id, agent, loops } => {
+                transcript.node(super::workflow_output::node_label(&id, &agent, &loops));
+                workflow.node(&id, loops);
+                self.model_inputs = ModelInputs::default();
+            }
+            WorkflowEvent::ModelLoading { previous, next } => {
+                let status = match previous {
+                    Some(previous) if previous == next => "Reloading",
+                    Some(_) => "Switching to",
+                    None => "Loading",
+                };
+                workflow.model = Some(format!("{status} {next}"));
+            }
+            WorkflowEvent::ModelLoaded { model } => workflow.model = Some(format!("Model {model}")),
+            WorkflowEvent::ModelInput(prompt) => self.model_inputs.push(prompt),
+            WorkflowEvent::LoopToolCall {
+                iteration,
+                name,
+                arguments,
+                error,
+            } => {
+                transcript.tool_call(super::workflow_output::loop_tool_label(
+                    &iteration,
+                    &name,
+                    arguments,
+                    error.as_deref(),
+                ));
+            }
+            WorkflowEvent::Output(text) => transcript.output(&text),
+            WorkflowEvent::NodeFinished => transcript.waiting = false,
+        }
     }
 
     async fn respond(
@@ -298,7 +435,11 @@ impl<'a> Tui<'a> {
         let [left, right] =
             Layout::horizontal([Constraint::Length(upper.width / 2), Constraint::Min(0)])
                 .areas(upper);
-        frame.render_widget(Block::bordered().border_type(BorderType::Rounded), left);
+        if let Some(workflow) = &mut self.workflow {
+            workflow.render(frame, left);
+        } else {
+            frame.render_widget(Block::bordered().border_type(BorderType::Rounded), left);
+        }
         self.model_inputs.render(frame, right);
 
         let bordered = chat.height >= 4 && chat.width >= 3;
@@ -307,8 +448,15 @@ impl<'a> Tui<'a> {
             Layout::vertical([Constraint::Min(0), Constraint::Length(input_height)]).areas(chat);
 
         let mut lines = Vec::new();
-        for turn in history {
-            append_turn(&mut lines, turn, transcript.width);
+        let mut workflows = self.workflow_history.iter().peekable();
+        for index in 0..=history.len() {
+            while let Some(workflow) = workflows.next_if(|workflow| workflow.history_index == index)
+            {
+                workflow.append(&mut lines, transcript.width, BUSY_FRAMES[self.busy_frame]);
+            }
+            if let Some(turn) = history.get(index) {
+                append_turn(&mut lines, turn, transcript.width);
+            }
         }
         if let Some(status) = &self.model_status {
             match status {
@@ -763,14 +911,14 @@ mod tests {
         assert_eq!(tui.page, page);
         assert_ne!(buffer[(25, 19)].symbol(), "x");
         assert_eq!(buffer[(40, 19)].symbol(), "x");
-        let first: String = (0..5).map(|column| buffer[(column, 18)].symbol()).collect();
-        let second: String = (0..6).map(|column| buffer[(column, 19)].symbol()).collect();
-        let third: String = (0..6).map(|column| buffer[(column, 20)].symbol()).collect();
+        let first: String = (0..5).map(|column| buffer[(column, 17)].symbol()).collect();
+        let second: String = (0..6).map(|column| buffer[(column, 18)].symbol()).collect();
+        let third: String = (0..6).map(|column| buffer[(column, 19)].symbol()).collect();
         assert_eq!(first, "/exit");
         assert_eq!(second, "/model");
         assert_eq!(third, "/reset");
         assert!(
-            buffer[(0, 18)]
+            buffer[(0, 17)]
                 .modifier
                 .contains(ratatui::style::Modifier::REVERSED)
         );
@@ -792,6 +940,85 @@ mod tests {
         tui.handle(key(KeyCode::Tab));
         assert_eq!(tui.input.text, "/reset café /exit\u{2003}later");
         assert_eq!(&tui.input.text[tui.input.cursor..], "later");
+        Ok(())
+    }
+
+    #[test]
+    fn workflow_pane_highlights_the_active_node_and_keeps_its_output_in_chat() -> Result<()> {
+        use arta::workflow::{LoopIteration, node::Node};
+        use ratatui::style::Modifier;
+
+        let nodes = [
+            Node::Loop {
+                id: "review-loop".into(),
+                nodes: vec![
+                    Node::Agent {
+                        id: "write".into(),
+                        agent: "writer".into(),
+                    },
+                    Node::Agent {
+                        id: "qa".into(),
+                        agent: "tester".into(),
+                    },
+                ],
+            },
+            Node::Agent {
+                id: "report".into(),
+                agent: "report".into(),
+            },
+        ];
+        let mut terminal = Terminal::new(TestBackend::new(96, 24))?;
+        let mut pane = WorkflowPane::from_nodes("sample", &nodes);
+        pane.start();
+        let mut tui = Tui {
+            workflow: Some(pane),
+            workflow_history: vec![WorkflowTranscript::new(0, "Review this".into())],
+            ..Tui::default()
+        };
+        tui.workflow_event(WorkflowEvent::NodeStarted {
+            id: "qa".into(),
+            agent: "tester".into(),
+            loops: vec![LoopIteration {
+                id: "review-loop".into(),
+                number: 2,
+            }],
+        });
+        tui.workflow_event(WorkflowEvent::ModelLoading {
+            previous: Some("llama.cpp/writer".into()),
+            next: "llama.cpp/reviewer".into(),
+        });
+        tui.workflow_event(WorkflowEvent::ModelInput("QA system prompt".into()));
+        tui.workflow_event(WorkflowEvent::LoopToolCall {
+            iteration: LoopIteration {
+                id: "review-loop".into(),
+                number: 2,
+            },
+            name: "break".into(),
+            arguments: [("message".into(), "Checking the work".into())]
+                .into_iter()
+                .collect(),
+            error: None,
+        });
+        tui.workflow_event(WorkflowEvent::Output("**Checking** the work".into()));
+        terminal.draw(|frame| tui.render(frame, &[], None))?;
+        let buffer = terminal.backend().buffer();
+        let text = |row, columns: std::ops::Range<u16>| {
+            columns
+                .map(|column| buffer[(column, row)].symbol())
+                .collect::<String>()
+        };
+        assert!(text(1, 1..47).contains("Switching to llama.cpp/reviewer"));
+        assert!(text(2, 1..47).contains("review-loop · iteration 2"));
+        assert!(text(3, 1..47).contains("write (writer)"));
+        assert!(text(4, 1..47).contains("▶ qa (tester)"));
+        assert!(text(5, 1..47).contains("report"));
+        assert!(buffer[(5, 4)].modifier.contains(Modifier::REVERSED));
+        assert!(text(1, 49..95).contains("QA system prompt"));
+        assert!(text(18, 0..96).contains("qa (tester) · review-loop iteration 2"));
+        assert!(text(19, 0..96).contains(
+            "Tool call break({\"message\":\"Checking the work\"}) · review-loop iteration 2"
+        ));
+        assert!(text(20, 0..96).contains("Checking the work"));
         Ok(())
     }
 }

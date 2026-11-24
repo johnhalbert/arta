@@ -43,6 +43,11 @@ impl ToolOutput {
 pub trait Tool: Send + Sync {
     fn spec(&self) -> &ToolSpec;
 
+    /// Finish the turn with this tool's output when the call succeeds.
+    fn finishes_turn(&self) -> bool {
+        false
+    }
+
     /// Return execution errors in the output when the model can use them to recover.
     fn call(&self, arguments: ToolArguments) -> BoxFuture<'_, Result<ToolOutput>>;
 }
@@ -81,5 +86,9 @@ impl Tools {
 
     pub(crate) fn get(&self, name: &str) -> Option<&dyn Tool> {
         self.entries.get(name).map(Arc::as_ref)
+    }
+
+    pub(crate) fn remove(&mut self, name: &str) {
+        self.entries.remove(name);
     }
 }

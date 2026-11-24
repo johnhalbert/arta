@@ -150,8 +150,13 @@ impl RuleContext<'_, '_> {
         self.submission.model_requests.push(id.map(str::to_owned));
     }
 
+    pub(super) fn request_workflow(&mut self, name: Option<&str>) {
+        self.submission.workflow_request = Some(name.map(str::to_owned));
+    }
+
     pub(super) fn clear_history(&mut self) {
         self.repl.history.clear();
+        self.repl.workflow = None;
         self.repl.skills.clear();
         self.repl.mcp_tools.clear_mentions();
         self.submission.history_cleared = true;
@@ -181,7 +186,8 @@ mod tests {
         let mut parser = Parser::default();
         command::register(&mut parser);
         let mut repl = Repl::new(
-            harness.agent_mut("cli", "reviewer")?,
+            &mut harness,
+            "reviewer",
             &parser,
             Default::default(),
             Default::default(),
@@ -195,6 +201,12 @@ mod tests {
         let submission = repl.submit("/reset café /reset 👋 /unknown".into());
         assert_eq!(submission.prompt.as_deref(), Some("café 👋 /unknown"));
         assert!(submission.history_cleared);
+        let submission = repl.submit("/workflow review Check the changes".into());
+        assert_eq!(submission.workflow_request, Some(Some("review".into())));
+        assert_eq!(submission.prompt.as_deref(), Some("Check the changes"));
+        let submission = repl.submit("/workflow review".into());
+        assert_eq!(submission.workflow_request, Some(Some("review".into())));
+        assert!(submission.prompt.is_none());
         Ok(())
     }
 
@@ -227,7 +239,8 @@ mod tests {
             },
         ));
         let mut repl = Repl::new(
-            harness.agent_mut("cli", "reviewer")?,
+            &mut harness,
+            "reviewer",
             &parser,
             Default::default(),
             Default::default(),

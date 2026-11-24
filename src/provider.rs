@@ -2,7 +2,7 @@ pub mod llama_cpp;
 pub mod registry;
 pub mod tool;
 
-use crate::{model::Model, stream::Message};
+use crate::{config::Config, model::Model, stream::Message};
 use anyhow::{Result, bail};
 use futures_util::future::BoxFuture;
 use std::sync::Arc;
@@ -25,6 +25,16 @@ pub trait Provider: Send + Sync {
     /// Release the current model's resources before loading its replacement.
     fn switch_model(&self, _current_id: &str, _model_id: &str) -> Result<Arc<dyn Model>> {
         bail!("this provider does not support model switching")
+    }
+
+    /// Release resources held for a model. Providers with no model cache can keep the default.
+    fn unload_model(&self, _model_id: &str) -> Result<()> {
+        Ok(())
+    }
+
+    /// Create a provider with agent-specific settings, sharing process-wide resources as needed.
+    fn configured(&self, _config: &Config) -> Result<Arc<dyn Provider>> {
+        bail!("this provider does not support agent-specific settings")
     }
 
     fn send<'a>(&'a self, model_id: &'a str, prompt: &'a str) -> BoxFuture<'a, Result<Message>>;

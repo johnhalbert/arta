@@ -67,6 +67,15 @@ impl Agent {
         self.workspace.as_deref()
     }
 
+    /// Release the selected model's resources while keeping its selection.
+    pub async fn unload_model(&self) -> Result<()> {
+        let provider = self.provider.clone();
+        let model_id = self.model.id().to_owned();
+        tokio::task::spawn_blocking(move || provider.unload_model(&model_id))
+            .await
+            .context("model unload worker failed")?
+    }
+
     /// Run one independent prompt against the agent's model.
     pub async fn prompt(&self, prompt: &str) -> Result<Message> {
         if self.system_prompt.is_some() {
@@ -108,11 +117,7 @@ impl Agent {
         tools: impl IntoIterator<Item = Arc<dyn Tool>>,
         observer: Option<PromptObserver>,
     ) -> Result<Message> {
-        let system_prompt = match self.system_prompt.as_deref() {
-            base if instructions.is_empty() => base.map(Cow::Borrowed),
-            Some(base) => Some(format!("{base}\n\n{instructions}").into()),
-            None => Some(instructions.into()),
-        };
+        let system_prompt = self.system_prompt_with(instructions);
         let mut selected = Tools::default();
         for tool in tools {
             selected.register(tool)?;
@@ -125,6 +130,40 @@ impl Agent {
             observer,
         )
         .await
+    }
+
+    pub(crate) async fn chat_recorded(
+        &self,
+        history: &[Turn],
+        past_exchanges: &[Vec<tool::ToolExchange>],
+        prompt: &str,
+        instructions: &str,
+        observer: Option<PromptObserver>,
+    ) -> Result<(Message, Vec<tool::ToolExchange>)> {
+        let system_prompt = self.system_prompt_with(instructions);
+        tool::chat_recorded(
+            self.provider(),
+            tool::ToolRequest {
+                model_id: self.model.id(),
+                system_prompt: system_prompt.as_deref(),
+                history,
+                prompt,
+                tools: &[],
+                exchanges: &[],
+            },
+            &self.tools,
+            past_exchanges,
+            observer,
+        )
+        .await
+    }
+
+    fn system_prompt_with<'a>(&'a self, instructions: &'a str) -> Option<Cow<'a, str>> {
+        match self.system_prompt.as_deref() {
+            base if instructions.is_empty() => base.map(Cow::Borrowed),
+            Some(base) => Some(format!("{base}\n\n{instructions}").into()),
+            None => Some(instructions.into()),
+        }
     }
 
     async fn chat_with_tools(

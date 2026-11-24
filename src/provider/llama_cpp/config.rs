@@ -9,8 +9,8 @@ pub use model::{
     ModelSplitMode, TensorBufferOverride,
 };
 
-use super::LlamaCPP;
 use super::sampling::SamplingConfig;
+use super::{LlamaCPP, logging};
 use crate::config::Config;
 use anyhow::{Context, Result, ensure};
 use llama_cpp_4::llama_backend::{LlamaBackend, NumaStrategy};
@@ -63,10 +63,9 @@ impl LlamaCPPConfig {
         if self.models.is_empty() {
             return Ok(None);
         }
-        let mut backend = LlamaBackend::init().context("failed to initialize llama.cpp")?;
-        if !self.verbose {
-            backend.void_logs();
-        }
+        let backend = LlamaBackend::init().context("failed to initialize llama.cpp")?;
+        logging::install();
+        let _logs = logging::Scope::new(self.verbose);
         if let Some(strategy) = match self.numa {
             NumaConfig::Disabled => None,
             NumaConfig::Distribute => Some(NumaStrategy::DISTRIBUTE),
@@ -94,7 +93,7 @@ pub enum NumaConfig {
 }
 
 /// Optional overrides for the selected llama.cpp model and its inference settings.
-#[derive(Default, Deserialize)]
+#[derive(Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LlamaCPPOverrides {
     pub model_path: Option<PathBuf>,

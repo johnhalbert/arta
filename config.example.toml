@@ -120,3 +120,6 @@ path = "gguf/Qwen3.5-4B-Q4_0.gguf"
 
 # [skills]
 # directories = [".agents/skills"]
+
+# [workflows]
+# path = "workflows"

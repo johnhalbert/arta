@@ -1,4 +1,5 @@
 mod config;
+mod logging;
 mod model;
 mod sampling;
 mod text;
@@ -32,9 +33,10 @@ use tokio::{
 pub struct LlamaCPP {
     models: HashMap<Arc<str>, LlamaCPPModelConfig>,
     loaded: Mutex<HashMap<Arc<str>, Arc<LlamaCPPModel>>>,
-    backend: Option<Arc<LlamaBackend>>,
+    backend: Arc<Mutex<Option<Arc<LlamaBackend>>>>,
     chat: Arc<ChatConfig>,
     inference: Arc<InferenceConfig>,
+    verbose: bool,
 }
 
 inventory::submit! {
@@ -51,13 +53,27 @@ impl LlamaCPP {
     }
 
     /// Initialize the backend and register models for on-demand loading.
-    pub fn new(mut config: LlamaCPPConfig) -> Result<Self> {
+    pub fn new(config: LlamaCPPConfig) -> Result<Self> {
+        Self::with_backend(config, Arc::default())
+    }
+
+    fn with_backend(
+        mut config: LlamaCPPConfig,
+        backend: Arc<Mutex<Option<Arc<LlamaBackend>>>>,
+    ) -> Result<Self> {
         config.context.validate()?;
         if let Some(sampling) = &config.sampling {
             sampling.validate()?;
         }
         config.chat.load_template()?;
-        let backend = config.init_backend()?;
+        {
+            let mut backend = backend
+                .lock()
+                .map_err(|_| anyhow::anyhow!("llama.cpp backend is unavailable"))?;
+            if backend.is_none() {
+                *backend = config.init_backend()?;
+            }
+        }
         let mut models = HashMap::with_capacity(config.models.len());
         for model in config.models {
             ensure!(
@@ -76,6 +92,7 @@ impl LlamaCPP {
             models,
             loaded: Mutex::default(),
             backend,
+            verbose: config.verbose,
             chat: Arc::new(config.chat),
             inference: Arc::new(InferenceConfig {
                 context_length: config.context_length,
@@ -96,25 +113,22 @@ impl LlamaCPP {
             .loaded
             .lock()
             .map_err(|_| anyhow::anyhow!("llama.cpp model cache is unavailable"))?;
-        if let Some(previous) = previous.filter(|&previous| previous != model_id)
-            && let Some(current) = loaded.get(previous)
-        {
-            ensure!(
-                Arc::strong_count(current) == 1,
-                "model '{previous}' is still in use"
-            );
-            drop(loaded.remove(previous));
+        let _logs = logging::Scope::new(self.verbose);
+        if let Some(previous) = previous.filter(|&previous| previous != model_id) {
+            Self::remove_model(&mut loaded, previous)?;
         }
         match loaded.entry(id.clone()) {
             Entry::Occupied(entry) => Ok(entry.get().clone()),
             Entry::Vacant(entry) => {
                 let backend = self
                     .backend
-                    .as_ref()
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("llama.cpp backend is unavailable"))?
+                    .clone()
                     .context("llama.cpp backend is unavailable")?;
                 let model = Arc::new(LlamaCPPModel::load(
                     id.clone(),
-                    backend.clone(),
+                    backend,
                     config,
                     self.chat.clone(),
                 )?);
@@ -122,6 +136,17 @@ impl LlamaCPP {
                 Ok(model)
             }
         }
+    }
+
+    fn remove_model(loaded: &mut HashMap<Arc<str>, Arc<LlamaCPPModel>>, id: &str) -> Result<()> {
+        if let Some(model) = loaded.get(id) {
+            ensure!(
+                Arc::strong_count(model) == 1,
+                "model '{id}' is still in use"
+            );
+            drop(loaded.remove(id));
+        }
+        Ok(())
     }
 }
 
@@ -132,6 +157,24 @@ impl Provider for LlamaCPP {
 
     fn switch_model(&self, current_id: &str, model_id: &str) -> Result<Arc<dyn Model>> {
         Ok(self.load_model(model_id, Some(current_id))?.info.clone())
+    }
+
+    fn unload_model(&self, model_id: &str) -> Result<()> {
+        let _logs = logging::Scope::new(self.verbose);
+        let mut loaded = self
+            .loaded
+            .lock()
+            .map_err(|_| anyhow::anyhow!("llama.cpp model cache is unavailable"))?;
+        Self::remove_model(&mut loaded, model_id)
+    }
+
+    fn configured(&self, config: &Config) -> Result<Arc<dyn Provider>> {
+        let mut settings: LlamaCPPConfig = config.provider_settings(Self::ID)?;
+        settings.resolve_paths(config);
+        Ok(Arc::new(Self::with_backend(
+            settings,
+            self.backend.clone(),
+        )?))
     }
 
     fn send<'a>(&'a self, model_id: &'a str, prompt: &'a str) -> BoxFuture<'a, Result<Message>> {
@@ -175,11 +218,13 @@ impl Provider for LlamaCPP {
             let prompt = prompt.to_owned();
             let system_prompt = system_prompt.map(str::to_owned);
             let inference = Arc::clone(&self.inference);
+            let verbose = self.verbose;
             let runtime =
                 Handle::try_current().context("llama.cpp inference requires a Tokio runtime")?;
             let (ready, prepared) = oneshot::channel();
             let (sender, receiver) = mpsc::channel(1);
             let worker = runtime.spawn_blocking(move || -> Result<()> {
+                let _logs = logging::Scope::new(verbose);
                 if sender.is_closed() {
                     return Ok(());
                 }

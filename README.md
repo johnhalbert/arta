@@ -1,6 +1,6 @@
 # arta
 
-`arta` uses llama.cpp to run one-shot prompts and interactive conversations with a model in a local GGUF file.
+`arta` uses llama.cpp to run one-shot prompts, interactive conversations, and workflows with local GGUF models.
 
 ## Build and run on Windows
 
@@ -103,6 +103,48 @@ mcp_servers:
 Use the exact names from `[mcp.servers]` in `config.toml`. You can add other servers to the conversation with `@server-name`. After `/reset`, the servers from the agent profile are visible on the next turn.
 
 Relative `workspace` and `model_path` values start from the Markdown file's directory. Both also accept absolute paths and `~/` paths. The workspace is the working directory of local MCP server processes. Model paths, skill directories, and MCP executable paths set in TOML keep their config-relative resolution.
+
+## Run a workflow
+
+Set the workflow root in `config.toml`. Relative paths start from the configuration file's directory. Use `--workflow-path PATH` to override the root for one run.
+
+```toml
+[workflows]
+path = "workflows"
+```
+
+Create `workflows/code-writing-loop/` with `workflow.yaml`, `developer.md`, `tester.md`, and `pull-request.md`. Define the order in `workflow.yaml`.
+
+```yaml
+id: code-writing-loop
+nodes:
+  - id: dev-loop
+    type: loop
+    nodes:
+      - id: code
+        type: agent
+        agent: developer
+      - id: qa
+        type: agent
+        agent: tester
+  - id: pull-request
+    type: agent
+    agent: pull-request
+```
+
+Use the same Markdown front matter and system prompt as for standalone agents. The `agent` field matches the filename without `.md`. Agent settings such as `model`, `workspace`, `mcp_servers`, and `config` apply to that agent. The workspace and agent-level model paths are relative to the Markdown file. CLI model flags override the corresponding settings for every node.
+
+```powershell
+arta --workflow code-writing-loop --prompt "Implement the requested change and review it."
+```
+
+Nodes run in order, and each receives the original request and the previous node's reply. Each node ID must be unique in the workflow. A node keeps its own conversation and tool results across iterations. Arta unloads the current model before loading a different model or agent-specific provider configuration.
+
+The final agent in a loop calls `continue` to repeat the loop or `break` to exit it. Set the optional `message` argument to pass feedback or results to the next node. The run reports an error if the agent finishes without making a decision. If the final child is itself a loop, its last agent takes a separate turn to decide whether to repeat the enclosing loop after the inner loop exits.
+
+In the terminal UI, enter `/workflow code-writing-loop` to preview the workflow and run it with your next prompt. Enter `/workflow code-writing-loop Implement the change` to select and run it in one step. The upper-left pane highlights the active node and shows the loop iteration and model changes. Use Ctrl+Page Up and Ctrl+Page Down to scroll through longer workflows. The active node's rendered model input stays in the upper-right pane, and each agent's reply appears in the chat. Ordinary chat resumes after the workflow finishes.
+
+The TUI records each `continue` or `break` call with its arguments in the chat. In the CLI, those calls, node names, loop iterations, and model changes go to standard error. Each node's reply goes to standard output as it becomes available. Use `--prompt -` to read the request from standard input. Rust callers can use `Harness::run_workflow` for the final reply or `Workflow::events` for live progress.
 
 ## Use tools during inference
 

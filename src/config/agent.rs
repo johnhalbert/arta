@@ -7,7 +7,7 @@ use std::{
     path::{self, Path, PathBuf},
 };
 
-/// A named agent loaded from a Markdown file in the user's Arta directory.
+/// A named agent loaded from a Markdown file.
 pub struct AgentProfile {
     name: String,
     workspace: PathBuf,
@@ -29,6 +29,12 @@ struct FrontMatter {
 
 impl AgentProfile {
     pub(super) fn load(name: &str, settings: &mut Config) -> Result<Self> {
+        let home =
+            env::home_dir().context("cannot determine the home directory for Arta agents")?;
+        Self::load_from(&home.join(".arta").join("agents"), name, settings)
+    }
+
+    pub(crate) fn load_from(directory: &Path, name: &str, settings: &mut Config) -> Result<Self> {
         ensure!(
             !name.is_empty()
                 && name
@@ -38,11 +44,10 @@ impl AgentProfile {
         );
         let home =
             env::home_dir().context("cannot determine the home directory for Arta agents")?;
-        let directory = home.join(".arta").join("agents");
         let file = directory.join(format!("{name}.md"));
         let source = fs::read_to_string(&file)
             .with_context(|| format!("failed to read agent definition '{}'", file.display()))?;
-        Self::parse(&home, &directory, name, &source, settings)
+        Self::parse(&home, directory, name, &source, settings)
             .with_context(|| format!("invalid agent definition '{}'", file.display()))
     }
 

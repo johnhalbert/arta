@@ -1,0 +1,318 @@
+mod agent;
+mod event;
+mod model;
+pub mod node;
+
+use self::{
+    agent::WorkflowAgent,
+    event::Progress,
+    model::ActiveModel,
+    node::{LoopDecision, Node},
+};
+use crate::{
+    config::{AgentProfile, Config},
+    harness::Harness,
+    tool::{Tool, Tools},
+};
+use anyhow::{Context, Result, ensure};
+pub use event::{LoopIteration, WorkflowEvent, WorkflowEvents};
+use futures_util::{
+    StreamExt,
+    future::{BoxFuture, ready},
+    stream,
+};
+use serde::Deserialize;
+use std::{
+    collections::{BTreeMap, HashMap, HashSet, btree_map, hash_map},
+    fs,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+use tokio::sync::mpsc;
+
+#[derive(Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WorkflowConfig {
+    pub path: Option<PathBuf>,
+}
+
+/// A workflow definition and the Markdown agent profiles it references.
+pub struct Workflow {
+    id: String,
+    nodes: Vec<Node>,
+    agents: BTreeMap<String, Profile>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Definition {
+    id: String,
+    nodes: Vec<Node>,
+}
+
+struct Profile {
+    agent: AgentProfile,
+    settings: Config,
+}
+
+impl Workflow {
+    /// Read `workflow.yaml` and the referenced agent Markdown files from a named directory.
+    pub fn load(config: &Config, name: &str) -> Result<Self> {
+        Self::load_with_overrides(config, name, |_| Ok(()))
+    }
+
+    /// Load a workflow and apply additional settings to each agent profile.
+    pub fn load_with_overrides(
+        config: &Config,
+        name: &str,
+        apply_overrides: impl Fn(&mut Config) -> Result<()>,
+    ) -> Result<Self> {
+        ensure!(
+            !name.is_empty()
+                && name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')),
+            "invalid workflow name '{name}': use letters, digits, underscores, or hyphens"
+        );
+        let root =
+            config.workflows.path.as_deref().context(
+                "set workflows.path or pass --workflow-path to select a workflow directory",
+            )?;
+        let directory = config.resolve_path(root).join(name);
+        let file = directory.join("workflow.yaml");
+        let source = fs::read_to_string(&file)
+            .with_context(|| format!("failed to read workflow '{}'", file.display()))?;
+        let definition: Definition = serde_saphyr::from_str(&source)
+            .with_context(|| format!("invalid workflow '{}'", file.display()))?;
+        ensure!(
+            !definition.id.trim().is_empty(),
+            "workflow id cannot be empty"
+        );
+        let mut ids = HashSet::new();
+        let mut agents = BTreeMap::new();
+        Node::visit_sequence(&definition.nodes, &mut ids, &mut |id, name| {
+            if let btree_map::Entry::Vacant(agent) = agents.entry(name.to_owned()) {
+                let mut settings = config.clone();
+                let profile = AgentProfile::load_from(&directory, name, &mut settings)
+                    .with_context(|| format!("failed to load agent '{name}' for node '{id}'"))?;
+                apply_overrides(&mut settings)
+                    .with_context(|| format!("invalid workflow overrides for node '{id}'"))?;
+                agent.insert(Profile {
+                    agent: profile,
+                    settings,
+                });
+            }
+            Ok(())
+        })
+        .with_context(|| format!("invalid workflow '{}'", file.display()))?;
+        Ok(Self {
+            id: definition.id,
+            nodes: definition.nodes,
+            agents,
+        })
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn nodes(&self) -> &[Node] {
+        &self.nodes
+    }
+
+    /// Run the workflow with fresh node histories and return the final node's reply.
+    pub async fn run(&self, harness: &mut Harness, prompt: &str) -> Result<String> {
+        self.run_with_progress(harness, prompt, &Progress::default())
+            .await
+    }
+
+    /// Run while streaming node, model, and output events. Dropping the stream cancels the run.
+    pub fn events<'a>(
+        &'a self,
+        harness: &'a mut Harness,
+        prompt: &'a str,
+        include_model_input: bool,
+    ) -> WorkflowEvents<'a> {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let execution = stream::once(async move {
+            let progress = Progress::new(sender.clone(), include_model_input);
+            if let Err(error) = self.run_with_progress(harness, prompt, &progress).await {
+                let _ = sender.send(Err(error));
+            }
+        })
+        .filter_map(|()| ready(None));
+        let events = stream::unfold(receiver, |mut receiver| async {
+            receiver.recv().await.map(|event| (event, receiver))
+        });
+        stream::select(events, execution).boxed()
+    }
+
+    async fn run_with_progress(
+        &self,
+        harness: &Harness,
+        prompt: &str,
+        progress: &Progress,
+    ) -> Result<String> {
+        ensure!(!prompt.trim().is_empty(), "prompt cannot be empty");
+        for profile in self.agents.values() {
+            harness.provider(&profile.settings.app.provider)?;
+        }
+        let mut run = Run {
+            harness,
+            profiles: &self.agents,
+            agents: HashMap::new(),
+            connections: HashMap::new(),
+            model: None,
+            request: prompt,
+            previous: None,
+            progress,
+            loops: Vec::new(),
+        };
+        let result = run.sequence(&self.nodes).await;
+        let cleanup = match run.model.take() {
+            Some(mut model) => tokio::task::spawn_blocking(move || model.unload())
+                .await
+                .context("workflow model unload worker failed")
+                .and_then(|result| result),
+            None => Ok(()),
+        };
+        result.with_context(|| format!("workflow '{}' failed", self.id))?;
+        cleanup.context("failed to unload the final workflow model")?;
+        Ok(run.previous.unwrap_or_default())
+    }
+}
+
+struct Run<'a> {
+    harness: &'a Harness,
+    profiles: &'a BTreeMap<String, Profile>,
+    agents: HashMap<&'a str, WorkflowAgent>,
+    connections: HashMap<(PathBuf, String), Vec<Arc<dyn Tool>>>,
+    model: Option<ActiveModel>,
+    request: &'a str,
+    previous: Option<String>,
+    progress: &'a Progress,
+    loops: Vec<LoopIteration>,
+}
+
+impl<'a> Run<'a> {
+    fn sequence<'b>(&'b mut self, nodes: &'a [Node]) -> BoxFuture<'b, Result<()>> {
+        Box::pin(async move {
+            for node in nodes {
+                self.node(node).await?;
+            }
+            Ok(())
+        })
+    }
+
+    async fn node(&mut self, node: &'a Node) -> Result<()> {
+        match node {
+            Node::Agent { id, agent } => {
+                self.agent(id, agent, false).await?;
+            }
+            Node::Loop { id, nodes } => {
+                let (last, preceding) = nodes.split_last().context("loop must contain nodes")?;
+                let (node, agent) = last.final_agent();
+                for number in 1.. {
+                    self.loops.push(LoopIteration {
+                        id: id.clone(),
+                        number,
+                    });
+                    self.sequence(preceding).await?;
+                    if matches!(last, Node::Loop { .. }) {
+                        self.sequence(std::slice::from_ref(last)).await?;
+                    }
+                    let decision = self.agent(node, agent, true).await?;
+                    self.loops.pop();
+                    if decision == Some(LoopDecision::Break) {
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn agent(
+        &mut self,
+        id: &'a str,
+        name: &str,
+        decides_loop: bool,
+    ) -> Result<Option<LoopDecision>> {
+        self.agent_turn(id, name, decides_loop)
+            .await
+            .with_context(|| format!("node '{id}' (agent '{name}') failed"))
+    }
+
+    async fn agent_turn(
+        &mut self,
+        id: &'a str,
+        name: &str,
+        decides_loop: bool,
+    ) -> Result<Option<LoopDecision>> {
+        let profile = &self.profiles[name];
+        self.progress
+            .emit(|| WorkflowEvent::NodeStarted {
+                id: id.to_owned(),
+                agent: name.to_owned(),
+                loops: self.loops.clone(),
+            })
+            .await;
+        let tools = self.tools(profile).await?;
+        let model = ActiveModel::select(
+            &mut self.model,
+            self.harness,
+            &profile.settings,
+            self.progress,
+        )
+        .await?;
+        let prompt = match &self.previous {
+            Some(reply) if !reply.is_empty() => format!(
+                "Workflow request:\n{}\n\nPrevious node's reply:\n{reply}",
+                self.request
+            ),
+            _ => self.request.to_owned(),
+        };
+        let (reply, decision) = self
+            .agents
+            .entry(id)
+            .or_default()
+            .run(
+                model,
+                &profile.agent,
+                tools,
+                prompt,
+                self.loops.last().filter(|_| decides_loop),
+                self.progress,
+            )
+            .await?;
+        self.progress.emit(|| WorkflowEvent::NodeFinished).await;
+        self.previous = Some(reply);
+        Ok(decision)
+    }
+
+    async fn tools(&mut self, profile: &Profile) -> Result<Tools> {
+        let mut tools = self.harness.workflow_tools();
+        let directory = profile.settings.resolve_path(Path::new("."));
+        let workspace = profile.agent.options().workspace.unwrap_or(&directory);
+        let mut seen = HashSet::new();
+        for name in profile
+            .agent
+            .mcp_servers()
+            .iter()
+            .filter(|name| seen.insert(*name))
+        {
+            let key = (workspace.to_owned(), name.clone());
+            if let hash_map::Entry::Vacant(entry) = self.connections.entry(key.clone()) {
+                let discovered = profile.settings.mcp.servers[name]
+                    .connect_in(name, &directory, workspace)
+                    .await
+                    .with_context(|| format!("failed to connect to MCP server '{name}'"))?;
+                entry.insert(discovered);
+            }
+            for tool in &self.connections[&key] {
+                tools.register(Arc::clone(tool))?;
+            }
+        }
+        Ok(tools)
+    }
+}

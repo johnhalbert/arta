@@ -1,6 +1,7 @@
 mod exit;
 mod model;
 mod reset;
+mod workflow;
 
 use super::parser::{Parser, Rule, RuleContext};
 

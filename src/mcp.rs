@@ -80,7 +80,7 @@ impl McpServerConfig {
         self.connect_in(name, directory, directory).await
     }
 
-    async fn connect_in(
+    pub(crate) async fn connect_in(
         &self,
         name: &str,
         directory: &Path,

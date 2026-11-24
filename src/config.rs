@@ -1,6 +1,11 @@
 mod agent;
 
-use crate::{mcp::McpConfig, provider::llama_cpp::LlamaCPPOverrides, skill::SkillConfig};
+use crate::{
+    mcp::McpConfig,
+    provider::llama_cpp::LlamaCPPOverrides,
+    skill::SkillConfig,
+    workflow::{Workflow, WorkflowConfig},
+};
 pub use agent::AgentProfile;
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -27,6 +32,7 @@ pub struct StartupConfig {
     pub settings: Config,
     pub prompt: Option<String>,
     pub agent: Option<AgentProfile>,
+    pub workflow: Option<Workflow>,
 }
 
 impl StartupConfig {
@@ -43,7 +49,7 @@ pub fn get() -> Result<&'static StartupConfig, &'static anyhow::Error> {
 #[derive(Default, Parser, Debug)]
 #[command(
     version,
-    about = "Run a prompt against a local GGUF model or start a conversation",
+    about = "Run a prompt or workflow against a local GGUF model, or start a conversation",
     after_help = "Run arta with no arguments to open the terminal UI using config.toml."
 )]
 struct Args {
@@ -54,6 +60,19 @@ struct Args {
     /// Run the named agent from ~/.arta/agents/NAME.md.
     #[arg(long, value_name = "NAME")]
     agent: Option<String>,
+
+    /// Run a named workflow under the configured workflow path.
+    #[arg(
+        long,
+        value_name = "NAME",
+        conflicts_with = "agent",
+        requires = "prompt"
+    )]
+    workflow: Option<String>,
+
+    /// Override the directory containing workflows for this run.
+    #[arg(long, value_name = "PATH", requires = "workflow")]
+    workflow_path: Option<PathBuf>,
 
     /// Override the provider selected in the configuration.
     #[arg(long, value_name = "ID")]
@@ -68,7 +87,7 @@ struct Args {
     model: Option<PathBuf>,
 
     /// Prompt text. Use - to read UTF-8 text from stdin.
-    #[arg(short, long, value_name = "TEXT", required_unless_present = "agent")]
+    #[arg(short, long, value_name = "TEXT", required_unless_present_any = ["agent", "config"])]
     prompt: Option<String>,
 
     /// Total token budget for the prompt and response (defaults to 4096 or the model's limit, whichever is lower).
@@ -96,26 +115,55 @@ impl Args {
             .as_deref()
             .map(|name| AgentProfile::load(name, &mut settings))
             .transpose()?;
-        if let Some(provider) = self.provider {
-            settings.app.provider = provider;
+        let overrides = CliOverrides {
+            provider: self.provider,
+            model: self.model_id,
+            llama: LlamaCPPOverrides {
+                model_path: self.model,
+                context_length: self.context_length,
+                max_tokens: self.max_tokens,
+                gpu_layers: self.gpu_layers,
+                verbose: self.verbose,
+            },
+        };
+        if self.workflow.is_none() {
+            overrides.apply(&mut settings)?;
         }
-        if let Some(model) = self.model_id {
-            settings.app.model = model;
+        if let Some(path) = self.workflow_path {
+            settings.workflows.path = Some(path::absolute(path)?);
         }
-        LlamaCPPOverrides {
-            model_path: self.model,
-            context_length: self.context_length,
-            max_tokens: self.max_tokens,
-            gpu_layers: self.gpu_layers,
-            verbose: self.verbose,
-        }
-        .apply(&mut settings)?;
+        let workflow = self
+            .workflow
+            .as_deref()
+            .map(|name| {
+                Workflow::load_with_overrides(&settings, name, |settings| overrides.apply(settings))
+            })
+            .transpose()?;
 
         Ok(StartupConfig {
             settings,
             prompt: self.prompt,
             agent,
+            workflow,
         })
+    }
+}
+
+struct CliOverrides {
+    provider: Option<String>,
+    model: Option<String>,
+    llama: LlamaCPPOverrides,
+}
+
+impl CliOverrides {
+    fn apply(&self, settings: &mut Config) -> Result<()> {
+        if let Some(provider) = &self.provider {
+            settings.app.provider.clone_from(provider);
+        }
+        if let Some(model) = &self.model {
+            settings.app.model.clone_from(model);
+        }
+        self.llama.clone().apply(settings)
     }
 }
 
@@ -125,6 +173,7 @@ pub struct Config {
     pub app: AppConfig,
     pub mcp: McpConfig,
     pub skills: SkillConfig,
+    pub workflows: WorkflowConfig,
     providers: BTreeMap<String, toml::Table>,
     #[serde(skip)]
     directory: PathBuf,
@@ -196,6 +245,10 @@ impl Config {
 
     pub(crate) fn provider_ids(&self) -> impl Iterator<Item = &str> {
         self.providers.keys().map(String::as_str)
+    }
+
+    pub(crate) fn provider_table(&self, id: &str) -> Option<&toml::Table> {
+        self.providers.get(id)
     }
 }
 

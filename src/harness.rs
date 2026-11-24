@@ -6,10 +6,11 @@ use crate::{
     provider::{Provider, registry::ProviderRegistry, tool},
     session::Session,
     tool::{Tool, Tools},
+    workflow::Workflow,
 };
 use anyhow::{Context, Result, bail, ensure};
 use std::{
-    collections::{HashMap, hash_map::Entry},
+    collections::{HashMap, HashSet, hash_map::Entry},
     path::Path,
     sync::Arc,
 };
@@ -19,6 +20,8 @@ pub struct Harness {
     sessions: HashMap<String, Session>,
     providers: HashMap<String, Arc<dyn Provider>>,
     tools: Arc<Tools>,
+    mcp_tool_names: HashSet<String>,
+    config: Config,
 }
 
 impl Harness {
@@ -34,6 +37,8 @@ impl Harness {
             sessions: HashMap::new(),
             providers: HashMap::new(),
             tools: Arc::default(),
+            mcp_tool_names: HashSet::new(),
+            config: config.clone(),
         };
         for (id, create) in registry.list() {
             harness
@@ -62,7 +67,7 @@ impl Harness {
         }
     }
 
-    fn provider_handle(&self, provider_id: &str) -> Result<&Arc<dyn Provider>> {
+    pub(crate) fn provider_handle(&self, provider_id: &str) -> Result<&Arc<dyn Provider>> {
         self.providers
             .get(provider_id)
             .with_context(|| format!("unknown provider '{provider_id}'"))
@@ -111,8 +116,32 @@ impl Harness {
             .mcp
             .register(&directory, workspace.unwrap_or(&directory), &mut tools)
             .await?;
+        self.mcp_tool_names.extend(
+            servers
+                .values()
+                .flatten()
+                .map(|tool| tool.spec().name.clone()),
+        );
         self.tools = Arc::new(tools);
         Ok(servers)
+    }
+
+    /// Load and run a named workflow using this harness's configuration.
+    pub async fn run_workflow(&mut self, name: &str, prompt: &str) -> Result<String> {
+        let workflow = Workflow::load(&self.config, name)?;
+        workflow.run(self, prompt).await
+    }
+
+    pub(crate) fn workflow_config(&self) -> &Config {
+        &self.config
+    }
+
+    pub(crate) fn workflow_tools(&self) -> Tools {
+        let mut tools = (*self.tools).clone();
+        for name in &self.mcp_tool_names {
+            tools.remove(name);
+        }
+        tools
     }
 
     /// Create a session with at least one named agent and bind each agent to a model.

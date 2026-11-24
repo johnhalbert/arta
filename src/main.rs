@@ -1,6 +1,7 @@
 mod markdown;
 mod repl;
 mod tui;
+mod workflow_output;
 
 use anyhow::{Context, Result, ensure};
 use arta::{
@@ -11,6 +12,7 @@ use arta::{
     provider::llama_cpp::{LlamaCPP, LlamaCPPConfig},
     skill::ActivateSkill,
     stream::{Frame, Message, Stream},
+    workflow::Workflow,
 };
 use futures_util::{StreamExt, stream};
 use std::{io::IsTerminal, process::ExitCode, sync::Arc};
@@ -26,13 +28,7 @@ struct Cli {
 }
 
 async fn run_once(startup: &'static StartupConfig, prompt: &str) -> Result<()> {
-    let input = if prompt == "-" {
-        stdin_message(BufReader::new(io::stdin())).await?
-    } else {
-        ensure!(!prompt.trim().is_empty(), "prompt cannot be empty");
-        Message::new(stream::iter([Ok(prompt.to_owned())]))
-    };
-
+    let input = prompt_message(prompt).await?;
     let cli = cli_harness(startup, false).await?;
     let replies = cli
         .harness
@@ -45,6 +41,53 @@ async fn run_once(startup: &'static StartupConfig, prompt: &str) -> Result<()> {
         |_| {},
     )
     .await
+}
+
+async fn prompt_message(prompt: &str) -> Result<Message> {
+    if prompt == "-" {
+        stdin_message(BufReader::new(io::stdin())).await
+    } else {
+        ensure!(!prompt.trim().is_empty(), "prompt cannot be empty");
+        Ok(Message::new(stream::iter([Ok(prompt.to_owned())])))
+    }
+}
+
+async fn run_workflow(
+    startup: &'static StartupConfig,
+    workflow: &Workflow,
+    prompt: &str,
+) -> Result<()> {
+    let prompt = prompt_message(prompt).await?.into_text().await?;
+    let mut harness = spawn_blocking(|| {
+        let mut harness = Harness::new(&startup.settings)?;
+        register_skills(&mut harness, &startup.settings)?;
+        Ok::<_, anyhow::Error>(harness)
+    })
+    .await
+    .context("failed to start the workflow harness")??;
+    workflow_output::write(
+        workflow.events(&mut harness, &prompt, false),
+        &mut io::stdout(),
+        &mut io::stderr(),
+        std::io::stdout().is_terminal(),
+    )
+    .await
+}
+
+fn register_skills(
+    harness: &mut Harness,
+    config: &config::Config,
+) -> Result<Option<Arc<ActivateSkill>>> {
+    let directories = config
+        .skills
+        .directories
+        .iter()
+        .map(|path| config.resolve_path(path));
+    let skills = ActivateSkill::discover(directories)?.map(Arc::new);
+    if let Some(tool) = &skills {
+        harness.register_tool(tool.clone())?;
+    }
+    Ok(skills)
 }
 
 async fn cli_harness(startup: &'static StartupConfig, fullscreen: bool) -> Result<Cli> {
@@ -74,15 +117,7 @@ async fn cli_harness(startup: &'static StartupConfig, fullscreen: bool) -> Resul
                 startup.agent_name()
             )
         })?;
-        let directories = config
-            .skills
-            .directories
-            .iter()
-            .map(|path| config.resolve_path(path));
-        let skills = ActivateSkill::discover(directories)?.map(Arc::new);
-        if let Some(tool) = &skills {
-            harness.register_tool(tool.clone())?;
-        }
+        let skills = register_skills(&mut harness, config)?;
         Ok::<_, anyhow::Error>((harness, skills))
     })
     .await
@@ -117,15 +152,16 @@ async fn run_conversation(startup: &'static StartupConfig) -> Result<()> {
         .map_or(&[][..], AgentProfile::mcp_servers);
     let mcp_tools = repl::mcp::register(&mut parser, cli.mcp, mcp_servers);
     let mut repl = repl::Repl::new(
-        cli.harness.agent_mut("cli", startup.agent_name())?,
+        &mut cli.harness,
+        startup.agent_name(),
         &parser,
         skills,
         mcp_tools,
     );
     if fullscreen {
-        tui::run(&mut repl).await
+        tui::run(&mut repl, &startup.settings).await
     } else {
-        repl.run_lines().await
+        repl.run_lines(&startup.settings).await
     }
 }
 
@@ -202,9 +238,11 @@ async fn main() -> ExitCode {
         Ok(config) => config,
         Err(error) => return report_error(error),
     };
-    let result = match config.prompt.as_deref() {
-        Some(prompt) => run_once(config, prompt).await,
-        None => run_conversation(config).await,
+    let result = match (config.workflow.as_ref(), config.prompt.as_deref()) {
+        (Some(workflow), Some(prompt)) => run_workflow(config, workflow, prompt).await,
+        (Some(_), None) => Err(anyhow::anyhow!("a workflow requires --prompt")),
+        (None, Some(prompt)) => run_once(config, prompt).await,
+        (None, None) => run_conversation(config).await,
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

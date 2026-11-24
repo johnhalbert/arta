@@ -49,6 +49,16 @@ pub trait ToolAdapter: Send + Sync {
     ) -> BoxFuture<'a, Result<ToolResponse>> {
         self.infer(request)
     }
+
+    /// Run inference with the tool exchanges belonging to each completed turn.
+    fn infer_recorded<'a>(
+        &'a self,
+        request: ToolRequest<'a>,
+        _past_exchanges: &'a [Vec<ToolExchange>],
+        observer: Option<PromptObserver>,
+    ) -> BoxFuture<'a, Result<ToolResponse>> {
+        self.infer_observed(request, observer)
+    }
 }
 
 pub(crate) async fn send(
@@ -72,12 +82,43 @@ pub(crate) async fn chat(
     tools: &Tools,
     observer: Option<PromptObserver>,
 ) -> Result<Message> {
+    let request = ToolRequest {
+        model_id,
+        system_prompt,
+        history,
+        prompt,
+        tools: &[],
+        exchanges: &[],
+    };
+    Ok(chat_recorded(provider, request, tools, &[], observer)
+        .await?
+        .0)
+}
+
+pub(crate) async fn chat_recorded(
+    provider: &dyn Provider,
+    request: ToolRequest<'_>,
+    tools: &Tools,
+    past_exchanges: &[Vec<ToolExchange>],
+    observer: Option<PromptObserver>,
+) -> Result<(Message, Vec<ToolExchange>)> {
     if tools.is_empty() {
-        return provider
-            .chat_observed(model_id, system_prompt, history, prompt, observer)
-            .await;
+        let reply = provider
+            .chat_observed(
+                request.model_id,
+                request.system_prompt,
+                request.history,
+                request.prompt,
+                observer,
+            )
+            .await?;
+        return Ok((reply, Vec::new()));
     }
     let specs = tools.specs();
+    let request = ToolRequest {
+        tools: &specs,
+        ..request
+    };
     let adapter = provider
         .tool_adapter()
         .context("this provider does not support tool use")?;
@@ -87,20 +128,19 @@ pub(crate) async fn chat(
 
     loop {
         let response = adapter
-            .infer_observed(
+            .infer_recorded(
                 ToolRequest {
-                    model_id,
-                    system_prompt,
-                    history,
-                    prompt,
-                    tools: &specs,
                     exchanges: &exchanges,
+                    ..request
                 },
+                past_exchanges,
                 observer.clone(),
             )
             .await?;
         let (content, reasoning, calls) = match response {
-            ToolResponse::Reply(reply) => return Ok(Message::new(stream::iter([Ok(reply)]))),
+            ToolResponse::Reply(reply) => {
+                return Ok((Message::new(stream::iter([Ok(reply)])), exchanges));
+            }
             ToolResponse::Calls {
                 content,
                 reasoning,
@@ -118,20 +158,37 @@ pub(crate) async fn chat(
         remaining_calls -= calls.len();
 
         let mut completed = Vec::with_capacity(calls.len());
+        let mut final_reply = None;
         for call in calls {
-            let output = match tools.get(&call.name) {
+            let tool = tools.get(&call.name);
+            let output = match tool {
                 Some(tool) => tool
                     .call(call.arguments.clone())
                     .await
                     .with_context(|| format!("failed to call tool '{}'", call.name))?,
                 None => ToolOutput::error(format!("Unknown tool '{}'", call.name)),
             };
+            if !output.is_error && tool.is_some_and(|tool| tool.finishes_turn()) {
+                final_reply = Some(match &output.content {
+                    serde_json::Value::String(text) if text.is_empty() => {
+                        content.clone().unwrap_or_default()
+                    }
+                    serde_json::Value::String(text) => text.clone(),
+                    value => value.to_string(),
+                });
+            }
             completed.push((call, output));
+            if final_reply.is_some() {
+                break;
+            }
         }
         exchanges.push(ToolExchange {
             content,
             reasoning,
             calls: completed,
         });
+        if let Some(reply) = final_reply {
+            return Ok((Message::new(stream::iter([Ok(reply)])), exchanges));
+        }
     }
 }

@@ -1,7 +1,9 @@
-use super::{LlamaCPP, Sampling, generate, model::chat_messages, text::text_chunks_with_stop};
+use super::{
+    LlamaCPP, Sampling, generate, logging, model::chat_messages_with, text::text_chunks_with_stop,
+};
 use crate::provider::{
     PromptObserver,
-    tool::{ToolAdapter, ToolCall, ToolRequest, ToolResponse},
+    tool::{ToolAdapter, ToolCall, ToolExchange, ToolRequest, ToolResponse},
 };
 use anyhow::{Context, Result, ensure};
 use futures_util::future::BoxFuture;
@@ -21,6 +23,15 @@ impl ToolAdapter for LlamaCPP {
         request: ToolRequest<'a>,
         observer: Option<PromptObserver>,
     ) -> BoxFuture<'a, Result<ToolResponse>> {
+        self.infer_recorded(request, &[], observer)
+    }
+
+    fn infer_recorded<'a>(
+        &'a self,
+        request: ToolRequest<'a>,
+        past_exchanges: &'a [Vec<ToolExchange>],
+        observer: Option<PromptObserver>,
+    ) -> BoxFuture<'a, Result<ToolResponse>> {
         Box::pin(async move {
             ensure!(
                 !request.prompt.contains('\0'),
@@ -33,14 +44,21 @@ impl ToolAdapter for LlamaCPP {
                 "system prompt contains a NUL character"
             );
             let model = self.load_model(request.model_id, None)?;
-            let (messages, tools) = tool_prompt(&request);
+            let (messages, tools) = tool_prompt(&request, past_exchanges);
             let inference = Arc::clone(&self.inference);
-            let previous_calls: usize = request.exchanges.iter().map(|turn| turn.calls.len()).sum();
+            let verbose = self.verbose;
+            let previous_calls = past_exchanges
+                .iter()
+                .flatten()
+                .chain(request.exchanges)
+                .map(|exchange| exchange.calls.len())
+                .sum();
             let runtime =
                 Handle::try_current().context("llama.cpp inference requires a Tokio runtime")?;
             let (worker_cancel, cancel_on_drop) = oneshot::channel::<()>();
             let result = runtime
                 .spawn_blocking(move || {
+                    let _logs = logging::Scope::new(verbose);
                     let cancelled = || worker_cancel.is_closed();
                     ensure!(!cancelled(), "llama.cpp inference cancelled");
                     let params = model.chat.params(messages, Some(tools))?;
@@ -89,9 +107,43 @@ impl ToolAdapter for LlamaCPP {
     }
 }
 
-fn tool_prompt(request: &ToolRequest<'_>) -> (String, String) {
-    let mut messages = chat_messages(request.system_prompt, request.history, request.prompt);
-    for exchange in request.exchanges {
+fn tool_prompt(
+    request: &ToolRequest<'_>,
+    past_exchanges: &[Vec<ToolExchange>],
+) -> (String, String) {
+    let mut messages = chat_messages_with(
+        request.system_prompt,
+        request.history,
+        request.prompt,
+        |index, messages| {
+            if let Some(exchanges) = past_exchanges.get(index) {
+                append_exchanges(messages, exchanges);
+            }
+        },
+    );
+    append_exchanges(&mut messages, request.exchanges);
+    let tools: Vec<_> = request
+        .tools
+        .iter()
+        .map(|tool| {
+            json!({
+                "type": "function",
+                "function": {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": tool.input_schema,
+                }
+            })
+        })
+        .collect();
+    (
+        Value::Array(messages).to_string(),
+        Value::Array(tools).to_string(),
+    )
+}
+
+fn append_exchanges(messages: &mut Vec<Value>, exchanges: &[ToolExchange]) {
+    for exchange in exchanges {
         let calls: Vec<_> = exchange
             .calls
             .iter()
@@ -133,24 +185,6 @@ fn tool_prompt(request: &ToolRequest<'_>) -> (String, String) {
             }));
         }
     }
-    let tools: Vec<_> = request
-        .tools
-        .iter()
-        .map(|tool| {
-            json!({
-                "type": "function",
-                "function": {
-                    "name": tool.name,
-                    "description": tool.description,
-                    "parameters": tool.input_schema,
-                }
-            })
-        })
-        .collect();
-    (
-        Value::Array(messages).to_string(),
-        Value::Array(tools).to_string(),
-    )
 }
 
 #[derive(Deserialize)]

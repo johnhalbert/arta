@@ -9,3 +9,4 @@ pub mod session;
 pub mod skill;
 pub mod stream;
 pub mod tool;
+pub mod workflow;

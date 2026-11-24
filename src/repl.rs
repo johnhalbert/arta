@@ -5,13 +5,18 @@ pub(super) mod skill;
 pub(super) mod suggestion;
 
 use super::markdown::TerminalOutput;
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use arta::{
-    agent::Agent,
-    provider::{PromptObserver, Turn},
+    config::Config,
+    harness::Harness,
+    provider::{
+        PromptObserver, Turn,
+        llama_cpp::{LlamaCPP, LlamaCPPOverrides},
+    },
     stream::{Message, Stream},
+    workflow::{Workflow, WorkflowEvents},
 };
-use futures_util::{TryStreamExt, stream};
+use futures_util::{StreamExt, TryStreamExt, stream};
 use parser::Parser;
 use std::io::IsTerminal;
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -22,30 +27,36 @@ pub(super) struct Submission {
     pub(super) exit: bool,
     pub(super) history_cleared: bool,
     pub(super) model_requests: Vec<Option<String>>,
+    pub(super) workflow_request: Option<Option<String>>,
 }
 
 /// Owns the conversation shared by the terminal and line-based interfaces.
 pub(super) struct Repl<'a> {
-    agent: &'a mut Agent,
+    harness: &'a mut Harness,
+    agent_name: &'a str,
     parser: &'a Parser,
     history: Vec<Turn>,
     skills: skill::Skills,
     mcp_tools: mcp::ToolSelection,
+    workflow: Option<Workflow>,
 }
 
 impl<'a> Repl<'a> {
     pub(super) fn new(
-        agent: &'a mut Agent,
+        harness: &'a mut Harness,
+        agent_name: &'a str,
         parser: &'a Parser,
         skills: skill::Skills,
         mcp_tools: mcp::ToolSelection,
     ) -> Self {
         Self {
-            agent,
+            harness,
+            agent_name,
             parser,
             history: Vec::new(),
             skills,
             mcp_tools,
+            workflow: None,
         }
     }
 
@@ -63,8 +74,9 @@ impl<'a> Repl<'a> {
     ) -> Result<Option<String>> {
         let mut status = None;
         for request in requests {
+            let agent = self.harness.agent_mut("cli", self.agent_name)?;
             let label = if let Some(id) = request {
-                self.agent
+                agent
                     .switch_model(&id)
                     .await
                     .with_context(|| format!("failed to switch to model '{id}'"))?;
@@ -72,9 +84,55 @@ impl<'a> Repl<'a> {
             } else {
                 "Current model is"
             };
-            status = Some(format!("{label} '{}'", self.agent.model().id()));
+            status = Some(format!("{label} '{}'", agent.model().id()));
         }
         Ok(status)
+    }
+
+    pub(super) fn select_workflow(
+        &mut self,
+        config: &Config,
+        name: Option<&str>,
+        fullscreen: bool,
+    ) -> Result<&Workflow> {
+        let name = name.context("Usage: /workflow NAME [PROMPT]")?;
+        ensure!(!name.is_empty(), "Usage: /workflow NAME [PROMPT]");
+        let workflow = Workflow::load_with_overrides(config, name, |settings| {
+            if fullscreen && settings.app.provider == LlamaCPP::ID {
+                LlamaCPPOverrides {
+                    verbose: Some(false),
+                    ..Default::default()
+                }
+                .apply(settings)?;
+            }
+            Ok(())
+        })?;
+        Ok(self.workflow.insert(workflow))
+    }
+
+    pub(super) fn take_workflow(&mut self) -> Option<Workflow> {
+        self.workflow.take()
+    }
+
+    pub(super) fn workflow_events<'b>(
+        &'b mut self,
+        workflow: &'b Workflow,
+        prompt: &'b str,
+        model_input: bool,
+    ) -> (&'b [Turn], WorkflowEvents<'b>) {
+        let harness = &mut *self.harness;
+        let agent_name = self.agent_name;
+        let events = stream::once(async move {
+            harness
+                .agent("cli", agent_name)?
+                .unload_model()
+                .await
+                .context("failed to release the conversation model")?;
+            Ok::<_, anyhow::Error>(workflow.events(harness, prompt, model_input))
+        })
+        .try_flatten()
+        .boxed();
+        (&self.history, events)
     }
 
     pub(super) fn history(&self) -> &[Turn] {
@@ -94,7 +152,8 @@ impl<'a> Repl<'a> {
                     .activation_tool()?
                     .into_iter()
                     .chain(self.mcp_tools.tools());
-                self.agent
+                self.harness
+                    .agent("cli", self.agent_name)?
                     .chat_with_context_observed(
                         &self.history,
                         prompt,
@@ -113,14 +172,14 @@ impl<'a> Repl<'a> {
         self.history.push(turn);
     }
 
-    pub(super) async fn run_lines(&mut self) -> Result<()> {
+    pub(super) async fn run_lines(&mut self, config: &Config) -> Result<()> {
         let interactive = std::io::stdin().is_terminal();
         let mut input = BufReader::new(io::stdin()).lines();
         let mut stdout = io::stdout();
         let mut stderr = io::stderr();
         if interactive {
             stderr
-                .write_all(b"Enter a prompt, /model <id> to switch models, /reset to clear the conversation, or /exit to quit.\n")
+                .write_all(b"Enter a prompt, /workflow NAME to select a workflow, /model ID to switch models, /reset to clear the conversation, or /exit to quit.\n")
                 .await?;
         }
         loop {
@@ -154,7 +213,52 @@ impl<'a> Repl<'a> {
                     continue;
                 }
             }
+            if let Some(request) = submission.workflow_request {
+                match self.select_workflow(config, request.as_deref(), false) {
+                    Ok(workflow) if submission.prompt.is_none() => {
+                        stderr
+                            .write_all(
+                                format!(
+                                    "Workflow {} selected. Enter a prompt to run it.\n",
+                                    workflow.id()
+                                )
+                                .as_bytes(),
+                            )
+                            .await?;
+                        stderr.flush().await?;
+                    }
+                    Ok(_) => {}
+                    Err(error) if !interactive => return Err(error),
+                    Err(error) => {
+                        stderr
+                            .write_all(format!("error: {error:#}\n").as_bytes())
+                            .await?;
+                        stderr.flush().await?;
+                        continue;
+                    }
+                }
+            }
             if let Some(prompt) = submission.prompt {
+                if let Some(workflow) = self.take_workflow() {
+                    let (_, events) = self.workflow_events(&workflow, &prompt, false);
+                    if let Err(error) = super::workflow_output::write(
+                        events,
+                        &mut stdout,
+                        &mut stderr,
+                        std::io::stdout().is_terminal(),
+                    )
+                    .await
+                    {
+                        if !interactive {
+                            return Err(error);
+                        }
+                        stderr
+                            .write_all(format!("error: {error:#}\n").as_bytes())
+                            .await?;
+                        stderr.flush().await?;
+                    }
+                    continue;
+                }
                 let mut reply = String::new();
                 let terminal = TerminalOutput::detect();
                 let result =
@@ -315,7 +419,8 @@ mod tests {
         let mut parser = Parser::default();
         command::register(&mut parser);
         let mut repl = Repl::new(
-            harness.agent_mut("cli", "reviewer")?,
+            &mut harness,
+            "reviewer",
             &parser,
             Default::default(),
             Default::default(),
@@ -333,7 +438,10 @@ mod tests {
                 .as_deref(),
             Some("Switched to model 'other model'")
         );
-        assert_eq!(repl.agent.model().id(), "other model");
+        assert_eq!(
+            repl.harness.agent("cli", "reviewer")?.model().id(),
+            "other model"
+        );
         assert_eq!(
             repl.reply("Continue", None).try_collect::<Vec<_>>().await?,
             vec![
@@ -365,7 +473,8 @@ mod tests {
         let mut parser = Parser::default();
         command::register(&mut parser);
         let mut repl = Repl::new(
-            harness.agent_mut("cli", "reviewer")?,
+            &mut harness,
+            "reviewer",
             &parser,
             Default::default(),
             Default::default(),
@@ -432,12 +541,7 @@ mod tests {
             assert_eq!(input, expected);
         }
 
-        let mut repl = Repl::new(
-            harness.agent_mut("cli", "reviewer")?,
-            &parser,
-            skills,
-            mcp_tools,
-        );
+        let mut repl = Repl::new(&mut harness, "reviewer", &parser, skills, mcp_tools);
         let plain = repl.reply("Hello", None).try_collect::<Vec<_>>().await?;
         assert_eq!(
             plain,
@@ -491,7 +595,8 @@ mod tests {
             &["notes".into()],
         );
         let mut repl = Repl::new(
-            harness.agent_mut("cli", "reviewer")?,
+            &mut harness,
+            "reviewer",
             &parser,
             Default::default(),
             mcp_tools,
