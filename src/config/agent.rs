@@ -12,6 +12,7 @@ pub struct AgentProfile {
     name: String,
     workspace: PathBuf,
     system_prompt: String,
+    mcp_servers: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -20,6 +21,8 @@ struct FrontMatter {
     provider: String,
     model: Option<String>,
     workspace: PathBuf,
+    #[serde(default)]
+    mcp_servers: Vec<String>,
     #[serde(default)]
     config: LlamaCPPOverrides,
 }
@@ -62,6 +65,12 @@ impl AgentProfile {
             !body.contains('\0'),
             "system prompt contains a NUL character"
         );
+        for server in &metadata.mcp_servers {
+            ensure!(
+                settings.mcp.servers.contains_key(server),
+                "unknown MCP server '{server}' in mcp_servers"
+            );
+        }
 
         let workspace =
             resolve_path(home, directory, &metadata.workspace).context("invalid workspace path")?;
@@ -84,11 +93,17 @@ impl AgentProfile {
             name: name.to_owned(),
             workspace,
             system_prompt: body.to_owned(),
+            mcp_servers: metadata.mcp_servers,
         })
     }
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// The configured MCP servers whose tools are visible throughout the conversation.
+    pub fn mcp_servers(&self) -> &[String] {
+        &self.mcp_servers
     }
 
     pub fn options(&self) -> AgentOptions<'_> {
@@ -127,12 +142,44 @@ path = "qwen.gguf"
 "#,
         )?;
         let source = "---\nprovider: llama.cpp\nworkspace: .\nconfig:\n  gpu_layers: 5\n---\n";
-        AgentProfile::parse(workspace, workspace, "reviewer", source, &mut settings)?;
+        let profile = AgentProfile::parse(workspace, workspace, "reviewer", source, &mut settings)?;
 
         assert_eq!(settings.app.model, "qwen3.5");
+        assert!(profile.mcp_servers().is_empty());
         let provider: LlamaCPPConfig = settings.provider_settings(LlamaCPP::ID)?;
         assert_eq!(provider.models[0].id, "qwen3.5");
         assert_eq!(provider.models[0].gpu_layers, 5);
+        Ok(())
+    }
+
+    #[test]
+    fn reads_mcp_servers_from_the_agent_profile_and_checks_their_names() -> Result<()> {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut settings: Config = toml::from_str(
+            r#"
+[mcp.servers.desktop-commander]
+command = "unused"
+"#,
+        )?;
+        let source =
+            "---\nprovider: llama.cpp\nworkspace: .\nmcp_servers:\n  - desktop-commander\n---\n";
+        let profile = AgentProfile::parse(workspace, workspace, "reviewer", source, &mut settings)?;
+        assert_eq!(profile.mcp_servers(), ["desktop-commander"]);
+
+        let unknown_source = source.replace("desktop-commander", "missing-server");
+        let Err(error) = AgentProfile::parse(
+            workspace,
+            workspace,
+            "reviewer",
+            &unknown_source,
+            &mut settings,
+        ) else {
+            anyhow::bail!("expected an error for an unconfigured MCP server");
+        };
+        assert_eq!(
+            error.to_string(),
+            "unknown MCP server 'missing-server' in mcp_servers"
+        );
         Ok(())
     }
 

@@ -111,11 +111,16 @@ async fn run_conversation(startup: &'static StartupConfig) -> Result<()> {
     let mut parser = repl::parser::Parser::default();
     repl::command::register(&mut parser);
     let skills = repl::skill::register(&mut parser, cli.skills);
-    repl::mcp::register(&mut parser, cli.mcp);
+    let mcp_servers = startup
+        .agent
+        .as_ref()
+        .map_or(&[][..], AgentProfile::mcp_servers);
+    let mcp_tools = repl::mcp::register(&mut parser, cli.mcp, mcp_servers);
     let mut repl = repl::Repl::new(
         cli.harness.agent_mut("cli", startup.agent_name())?,
         &parser,
         skills,
+        mcp_tools,
     );
     if fullscreen {
         tui::run(&mut repl).await

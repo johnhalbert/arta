@@ -10,11 +10,10 @@ use arta::{
     agent::Agent,
     provider::{PromptObserver, Turn},
     stream::{Message, Stream},
-    tool::Tool,
 };
 use futures_util::{TryStreamExt, stream};
 use parser::Parser;
-use std::{collections::BTreeMap, io::IsTerminal, sync::Arc};
+use std::io::IsTerminal;
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 #[derive(Default)]
@@ -31,17 +30,22 @@ pub(super) struct Repl<'a> {
     parser: &'a Parser,
     history: Vec<Turn>,
     skills: skill::Skills,
-    mcp_tools: BTreeMap<String, Arc<dyn Tool>>,
+    mcp_tools: mcp::ToolSelection,
 }
 
 impl<'a> Repl<'a> {
-    pub(super) fn new(agent: &'a mut Agent, parser: &'a Parser, skills: skill::Skills) -> Self {
+    pub(super) fn new(
+        agent: &'a mut Agent,
+        parser: &'a Parser,
+        skills: skill::Skills,
+        mcp_tools: mcp::ToolSelection,
+    ) -> Self {
         Self {
             agent,
             parser,
             history: Vec::new(),
             skills,
-            mcp_tools: BTreeMap::new(),
+            mcp_tools,
         }
     }
 
@@ -89,7 +93,7 @@ impl<'a> Repl<'a> {
                     .skills
                     .activation_tool()?
                     .into_iter()
-                    .chain(self.mcp_tools.values().cloned());
+                    .chain(self.mcp_tools.tools());
                 self.agent
                     .chat_with_context_observed(
                         &self.history,
@@ -192,10 +196,10 @@ mod tests {
         },
         skill::ActivateSkill,
         stream::Frame,
-        tool::{ToolArguments, ToolOutput, ToolSpec},
+        tool::{Tool, ToolArguments, ToolOutput, ToolSpec},
     };
     use futures_util::future::BoxFuture;
-    use std::path::PathBuf;
+    use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
     struct TestProvider(&'static str);
 
@@ -277,6 +281,14 @@ mod tests {
         }
     }
 
+    fn test_mcp_tools(name: &str) -> Vec<Arc<dyn Tool>> {
+        vec![Arc::new(TestMcpTool(ToolSpec {
+            name: format!("{name}__lookup"),
+            description: "Look up notes".into(),
+            input_schema: Default::default(),
+        }))]
+    }
+
     pub(super) fn test_harness() -> Result<Harness> {
         let mut harness = Harness::new(&Config::default())?;
         harness.register_provider("test", || Ok(Arc::new(TestProvider("test"))))?;
@@ -305,6 +317,7 @@ mod tests {
         let mut repl = Repl::new(
             harness.agent_mut("cli", "reviewer")?,
             &parser,
+            Default::default(),
             Default::default(),
         );
         repl.complete(Turn {
@@ -355,6 +368,7 @@ mod tests {
             harness.agent_mut("cli", "reviewer")?,
             &parser,
             Default::default(),
+            Default::default(),
         );
         repl.complete(Turn {
             prompt: "Hello".into(),
@@ -398,19 +412,13 @@ mod tests {
             &mut parser,
             ActivateSkill::discover([directory])?.map(Arc::new),
         );
-        let server = |name: &str| -> Vec<Arc<dyn Tool>> {
-            vec![Arc::new(TestMcpTool(ToolSpec {
-                name: format!("{name}__lookup"),
-                description: "Look up notes".into(),
-                input_schema: Default::default(),
-            }))]
-        };
-        mcp::register(
+        let mcp_tools = mcp::register(
             &mut parser,
             BTreeMap::from([
-                ("notes".into(), server("notes")),
-                ("other".into(), server("other")),
+                ("notes".into(), test_mcp_tools("notes")),
+                ("other".into(), test_mcp_tools("other")),
             ]),
+            &[],
         );
 
         let candidates: Vec<_> = parser.suggestions().collect();
@@ -424,7 +432,12 @@ mod tests {
             assert_eq!(input, expected);
         }
 
-        let mut repl = Repl::new(harness.agent_mut("cli", "reviewer")?, &parser, skills);
+        let mut repl = Repl::new(
+            harness.agent_mut("cli", "reviewer")?,
+            &parser,
+            skills,
+            mcp_tools,
+        );
         let plain = repl.reply("Hello", None).try_collect::<Vec<_>>().await?;
         assert_eq!(
             plain,
@@ -461,6 +474,50 @@ mod tests {
             repl.reply("Hello", None).try_collect::<Vec<_>>().await?,
             plain
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn profile_mcp_tools_survive_reset_without_duplicating_mentions() -> Result<()> {
+        let mut harness = test_harness()?;
+        let mut parser = Parser::default();
+        command::register(&mut parser);
+        let mcp_tools = mcp::register(
+            &mut parser,
+            BTreeMap::from([
+                ("notes".into(), test_mcp_tools("notes")),
+                ("other".into(), test_mcp_tools("other")),
+            ]),
+            &["notes".into()],
+        );
+        let mut repl = Repl::new(
+            harness.agent_mut("cli", "reviewer")?,
+            &parser,
+            Default::default(),
+            mcp_tools,
+        );
+
+        for (input, expected) in [
+            ("Check notes", "notes__lookup"),
+            (
+                "@notes @other Check notes @notes",
+                "notes__lookup,other__lookup",
+            ),
+            ("Check notes", "notes__lookup,other__lookup"),
+            ("/reset Check notes", "notes__lookup"),
+        ] {
+            let submission = repl.submit(input.into());
+            let prompt = submission.prompt.as_deref().unwrap();
+            assert_eq!(prompt, "Check notes");
+            assert_eq!(
+                repl.reply(prompt, None).try_collect::<Vec<_>>().await?,
+                vec![
+                    Frame::Begin,
+                    Frame::Chunk(format!("Check notes\nUse short answers.\n{expected}")),
+                    Frame::End,
+                ]
+            );
+        }
         Ok(())
     }
 }

@@ -153,7 +153,7 @@ impl RuleContext<'_, '_> {
     pub(super) fn clear_history(&mut self) {
         self.repl.history.clear();
         self.repl.skills.clear();
-        self.repl.mcp_tools.clear();
+        self.repl.mcp_tools.clear_mentions();
         self.submission.history_cleared = true;
     }
 
@@ -162,12 +162,7 @@ impl RuleContext<'_, '_> {
     }
 
     pub(super) fn expose_mcp_tools(&mut self, tools: &[Arc<dyn Tool>]) {
-        for tool in tools {
-            self.repl
-                .mcp_tools
-                .entry(tool.spec().name.clone())
-                .or_insert_with(|| Arc::clone(tool));
-        }
+        self.repl.mcp_tools.expose(tools);
     }
 
     pub(super) fn exit(&mut self) {
@@ -188,6 +183,7 @@ mod tests {
         let mut repl = Repl::new(
             harness.agent_mut("cli", "reviewer")?,
             &parser,
+            Default::default(),
             Default::default(),
         );
 
@@ -233,6 +229,7 @@ mod tests {
         let mut repl = Repl::new(
             harness.agent_mut("cli", "reviewer")?,
             &parser,
+            Default::default(),
             Default::default(),
         );
 

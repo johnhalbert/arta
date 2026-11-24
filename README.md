@@ -93,13 +93,22 @@ Run `arta --agent reviewer` for an interactive conversation or `arta --agent rev
 
 The agent's `provider` and optional `config` override the corresponding settings from `config.toml`. Omit `model` to inherit `[app].model`, or set it to a model ID for the agent's provider. For example, if an agent specifies `model: local` and you rename that model ID in TOML, update or remove the agent's `model` line. For llama.cpp, `config` accepts `model_path`, `context_length`, `max_tokens`, `gpu_layers`, and `verbose`. Set `model_path` to use a GGUF directly. CLI flags take precedence over the agent settings.
 
+List configured servers under `mcp_servers` in the agent's YAML front matter to expose their tools on every REPL turn.
+
+```yaml
+mcp_servers:
+  - desktop-commander
+```
+
+Use the exact names from `[mcp.servers]` in `config.toml`. You can add other servers to the conversation with `@server-name`. After `/reset`, the servers from the agent profile are visible on the next turn.
+
 Relative `workspace` and `model_path` values start from the Markdown file's directory. Both also accept absolute paths and `~/` paths. The workspace is the working directory of local MCP server processes. Model paths, skill directories, and MCP executable paths set in TOML keep their config-relative resolution.
 
 ## Use tools during inference
 
 Configure MCP servers under `[mcp.servers]` to make their tools available in one-shot prompts and interactive conversations. For a local stdio server, set `command` and optional `args` and `env`. The process starts in the selected agent's workspace or defaults to the config file's directory. For a Streamable HTTP server, set `url` and optionally set `bearer_token_env` to the name of an environment variable containing its bearer token. See `config.example.toml` for both forms.
 
-Arta discovers tools at startup and exposes them as `server__tool` names, with periods replaced by underscores. One-shot prompts can use tools from all configured servers. In a REPL conversation, use `@server-name` to expose that server's tools. Set `tools` on a server to list the original names to expose. Omitting it exposes every tool the server advertises. The model can invoke exposed tools automatically, so configure servers and tools you trust to run.
+Arta discovers tools at startup and exposes them as `server__tool` names, with periods replaced by underscores. One-shot prompts can use tools from all configured servers. In a REPL conversation, expose a server's tools with `@server-name` or the agent's `mcp_servers` setting. Set `tools` on a server to list the original names to expose. Omitting it exposes every tool the server advertises. The model can invoke exposed tools automatically, so configure servers and tools you trust to run.
 
 The llama.cpp model needs a chat template that supports tool calls. Arta runs up to eight calls per prompt and feeds text or structured JSON results back into the model. Tool schemas and results count toward the context limit. Each inference step has its own `max_tokens` budget. With tools enabled, Arta buffers inference steps and displays the final reply when it is ready.
 
