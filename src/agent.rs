@@ -1,11 +1,12 @@
 use crate::{
     model::Model,
-    provider::{Provider, Turn, tool},
+    provider::{PromptObserver, Provider, Turn, tool},
     stream::Message,
     tool::{Tool, Tools},
 };
 use anyhow::{Context, Result};
 use std::{
+    borrow::Cow,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -76,8 +77,14 @@ impl Agent {
 
     /// Run a prompt with conversation history supplied by the caller.
     pub async fn chat(&self, history: &[Turn], prompt: &str) -> Result<Message> {
-        self.chat_with_tools(history, prompt, self.system_prompt.as_deref(), &self.tools)
-            .await
+        self.chat_with_tools(
+            history,
+            prompt,
+            self.system_prompt.as_deref(),
+            &self.tools,
+            None,
+        )
+        .await
     }
 
     /// Run a turn with the supplied tools and optional instructions appended to the agent's system prompt.
@@ -88,8 +95,21 @@ impl Agent {
         instructions: &str,
         tools: impl IntoIterator<Item = Arc<dyn Tool>>,
     ) -> Result<Message> {
+        self.chat_with_context_observed(history, prompt, instructions, tools, None)
+            .await
+    }
+
+    /// Run a context turn, optionally observing the provider's input at each inference step.
+    pub async fn chat_with_context_observed(
+        &self,
+        history: &[Turn],
+        prompt: &str,
+        instructions: &str,
+        tools: impl IntoIterator<Item = Arc<dyn Tool>>,
+        observer: Option<PromptObserver>,
+    ) -> Result<Message> {
         let system_prompt = match self.system_prompt.as_deref() {
-            base if instructions.is_empty() => base.map(std::borrow::Cow::Borrowed),
+            base if instructions.is_empty() => base.map(Cow::Borrowed),
             Some(base) => Some(format!("{base}\n\n{instructions}").into()),
             None => Some(instructions.into()),
         };
@@ -97,8 +117,14 @@ impl Agent {
         for tool in tools {
             selected.register(tool)?;
         }
-        self.chat_with_tools(history, prompt, system_prompt.as_deref(), &selected)
-            .await
+        self.chat_with_tools(
+            history,
+            prompt,
+            system_prompt.as_deref(),
+            &selected,
+            observer,
+        )
+        .await
     }
 
     async fn chat_with_tools(
@@ -107,6 +133,7 @@ impl Agent {
         prompt: &str,
         system_prompt: Option<&str>,
         tools: &Tools,
+        observer: Option<PromptObserver>,
     ) -> Result<Message> {
         tool::chat(
             self.provider(),
@@ -115,6 +142,7 @@ impl Agent {
             history,
             prompt,
             tools,
+            observer,
         )
         .await
     }

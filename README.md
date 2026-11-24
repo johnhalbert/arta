@@ -58,7 +58,9 @@ Set up `config.toml` in your working directory, then run `arta` with no argument
 .\target\release\arta.exe
 ```
 
-The full-screen view has two empty panes across the top and a conversation in the bottom half. Press Enter to send a prompt. Animated dots appear below Arta's name until the reply starts streaming. The conversation renders Markdown in replies as they arrive, including headings, emphasis, lists, links, code blocks, and tables. Use Page Up and Page Down to read earlier turns, or Ctrl+End to return to the latest reply.
+The top-right Model Input pane shows the full text rendered by llama.cpp before tokenization, including the conversation, system instructions, tool definitions, and tool results as rendered by the model's chat template. Use Shift+Page Up and Shift+Page Down to scroll. If a turn runs several inference steps, use Alt+Left and Alt+Right to inspect each input. The pane keeps the inputs for the latest submitted turn until you send another prompt or run `/reset`.
+
+The conversation is in the bottom half. Press Enter to send a prompt. Animated dots appear below Arta's name until the reply starts streaming. The conversation renders Markdown in replies as they arrive, including headings, emphasis, lists, links, code blocks, and tables. Use Page Up and Page Down to read earlier turns, or Ctrl+End to return to the latest reply.
 
 Type `/`, `$`, or `@` at the start of a word to see matching commands, skills, or MCP servers. Use the Up and Down arrow keys to select a suggestion, Tab to complete it, and Enter to submit. Use `/reset` to clear conversation history and active mentions, and `/exit` or Ctrl+C to quit.
 

@@ -1,5 +1,8 @@
 use super::{LlamaCPP, Sampling, generate, model::chat_messages, text::text_chunks_with_stop};
-use crate::provider::tool::{ToolAdapter, ToolCall, ToolRequest, ToolResponse};
+use crate::provider::{
+    PromptObserver,
+    tool::{ToolAdapter, ToolCall, ToolRequest, ToolResponse},
+};
 use anyhow::{Context, Result, ensure};
 use futures_util::future::BoxFuture;
 use llama_cpp_4::prelude::AddBos;
@@ -10,6 +13,14 @@ use tokio::{runtime::Handle, sync::oneshot};
 
 impl ToolAdapter for LlamaCPP {
     fn infer<'a>(&'a self, request: ToolRequest<'a>) -> BoxFuture<'a, Result<ToolResponse>> {
+        self.infer_observed(request, None)
+    }
+
+    fn infer_observed<'a>(
+        &'a self,
+        request: ToolRequest<'a>,
+        observer: Option<PromptObserver>,
+    ) -> BoxFuture<'a, Result<ToolResponse>> {
         Box::pin(async move {
             ensure!(
                 !request.prompt.contains('\0'),
@@ -37,6 +48,9 @@ impl ToolAdapter for LlamaCPP {
                         .tool_template()?
                         .apply(&params)
                         .context("failed to format tool prompt")?;
+                    if let Some(observe) = &observer {
+                        observe(&chat.prompt);
+                    }
                     let add_bos = if model.inner.get_vocab().get_add_bos() {
                         AddBos::Always
                     } else {

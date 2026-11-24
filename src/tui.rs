@@ -24,9 +24,13 @@ use ratatui::{
 };
 use std::{
     io, mem,
+    sync::Arc,
     time::{Duration, Instant},
 };
-use tokio::time::{MissedTickBehavior, interval};
+use tokio::{
+    sync::mpsc,
+    time::{MissedTickBehavior, interval},
+};
 use unicode_segmentation::UnicodeSegmentation;
 
 const BUSY_FRAMES: [&str; 6] = [".", "..", "...", " ..", "  .", ""];
@@ -52,6 +56,7 @@ pub(super) async fn run(repl: &mut Repl<'_>) -> Result<()> {
                 if submission.history_cleared {
                     tui.failure = None;
                     tui.scroll = None;
+                    tui.model_inputs = ModelInputs::default();
                 }
                 if !submission.model_requests.is_empty() {
                     tui.failure = None;
@@ -131,6 +136,7 @@ struct Tui<'a> {
     scroll: Option<u16>,
     latest: u16,
     page: u16,
+    model_inputs: ModelInputs,
     busy_frame: usize,
     failure: Option<(Turn, String)>,
     model_status: Option<Result<String, String>>,
@@ -178,6 +184,21 @@ impl<'a> Tui<'a> {
                 } else {
                     match key.code {
                         KeyCode::Enter => return InputEvent::Submit,
+                        KeyCode::Left if key.modifiers == KeyModifiers::ALT => {
+                            self.model_inputs
+                                .select(self.model_inputs.selected.saturating_sub(1));
+                        }
+                        KeyCode::Right if key.modifiers == KeyModifiers::ALT => {
+                            self.model_inputs.select(self.model_inputs.selected + 1);
+                        }
+                        KeyCode::PageUp if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                            let pane = &mut self.model_inputs;
+                            pane.scroll = pane.scroll.saturating_sub(pane.page);
+                        }
+                        KeyCode::PageDown if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                            let pane = &mut self.model_inputs;
+                            pane.scroll = pane.scroll.saturating_add(pane.page).min(pane.last_row);
+                        }
                         KeyCode::PageUp => {
                             self.scroll =
                                 Some(self.scroll.unwrap_or(self.latest).saturating_sub(self.page));
@@ -207,12 +228,17 @@ impl<'a> Tui<'a> {
         self.scroll = None;
         self.failure = None;
         self.busy_frame = 0;
+        self.model_inputs = ModelInputs::default();
         let mut turn = Turn {
             prompt,
             reply: String::new(),
         };
         screen.draw(|frame| self.render(frame, repl.history(), Some(&turn)))?;
-        let mut replies = repl.reply(&turn.prompt);
+        let (sender, mut captured) = mpsc::unbounded_channel();
+        let observer = Arc::new(move |prompt: &str| {
+            let _ = sender.send(prompt.to_owned());
+        });
+        let mut replies = repl.reply(&turn.prompt, Some(observer));
         let started = Instant::now();
         let mut refresh = interval(Duration::from_millis(33));
         refresh.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -224,6 +250,11 @@ impl<'a> Tui<'a> {
                     if matches!(self.handle(event), InputEvent::Quit) {
                         return Ok(false);
                     }
+                    screen.draw(|frame| self.render(frame, repl.history(), Some(&turn)))?;
+                    dirty = false;
+                }
+                Some(prompt) = captured.recv() => {
+                    self.model_inputs.push(prompt);
                     screen.draw(|frame| self.render(frame, repl.history(), Some(&turn)))?;
                     dirty = false;
                 }
@@ -248,6 +279,10 @@ impl<'a> Tui<'a> {
             }
         };
         drop(replies);
+        // A finished reply can win the select while a captured input is still queued.
+        while let Ok(prompt) = captured.try_recv() {
+            self.model_inputs.push(prompt);
+        }
         if let Some(error) = error {
             self.failure = Some((turn, error));
         } else {
@@ -263,9 +298,8 @@ impl<'a> Tui<'a> {
         let [left, right] =
             Layout::horizontal([Constraint::Length(upper.width / 2), Constraint::Min(0)])
                 .areas(upper);
-        for pane in [left, right] {
-            frame.render_widget(Block::bordered().border_type(BorderType::Rounded), pane);
-        }
+        frame.render_widget(Block::bordered().border_type(BorderType::Rounded), left);
+        self.model_inputs.render(frame, right);
 
         let bordered = chat.height >= 4 && chat.width >= 3;
         let input_height = if bordered { 3 } else { 1 };
@@ -362,6 +396,72 @@ impl<'a> Tui<'a> {
             prompt = inner;
         }
         self.input.render(frame, prompt);
+    }
+}
+
+#[derive(Default)]
+struct ModelInputs {
+    prompts: Vec<String>,
+    selected: usize,
+    scroll: u16,
+    last_row: u16,
+    page: u16,
+}
+
+impl ModelInputs {
+    fn push(&mut self, prompt: String) {
+        let follows_latest = self.selected == self.prompts.len().saturating_sub(1);
+        self.prompts.push(prompt);
+        if follows_latest {
+            self.select(self.prompts.len() - 1);
+        }
+    }
+
+    fn select(&mut self, index: usize) {
+        let index = index.min(self.prompts.len().saturating_sub(1));
+        if index != self.selected {
+            self.selected = index;
+            self.scroll = 0;
+        }
+    }
+
+    fn render(&mut self, frame: &mut Frame<'_>, area: Rect) {
+        let multiple = self.prompts.len() > 1;
+        let title = if multiple {
+            format!(" Model Input {}/{} ", self.selected + 1, self.prompts.len())
+        } else {
+            " Model Input ".into()
+        };
+        let mut block = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .title(title.bold());
+        let inner = block.inner(area);
+        if inner.is_empty() {
+            frame.render_widget(block, area);
+            return;
+        }
+
+        let lines = match self.prompts.get(self.selected) {
+            Some(prompt) => display_lines(prompt).collect::<Vec<_>>(),
+            None => vec![Line::raw("No model input yet").dim()],
+        };
+        let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+        self.page = inner.height.saturating_sub(1).max(1);
+        let last_row = paragraph
+            .line_count(inner.width)
+            .saturating_sub(usize::from(inner.height));
+        self.last_row = u16::try_from(last_row).unwrap_or(u16::MAX);
+        self.scroll = self.scroll.min(self.last_row);
+        let controls = match (last_row > 0, multiple) {
+            (true, true) => " Shift+PgUp/Dn · Alt+←/→ ",
+            (true, false) => " Shift+PgUp/PgDn ",
+            (false, true) => " Alt+←/→ ",
+            (false, false) => "",
+        };
+        if !controls.is_empty() {
+            block = block.title_bottom(controls.dim());
+        }
+        frame.render_widget(paragraph.block(block).scroll((self.scroll, 0)), area);
     }
 }
 
@@ -552,6 +652,45 @@ mod tests {
         terminal.backend_mut().resize(30, 3);
         terminal.draw(|frame| tui.render(frame, &history, Some(&pending)))?;
         assert_eq!(terminal.backend().buffer()[(0, 1)].symbol(), "L");
+        Ok(())
+    }
+
+    #[test]
+    fn model_input_pane_pages_and_switches_between_inference_steps() -> Result<()> {
+        let mut terminal = Terminal::new(TestBackend::new(60, 12))?;
+        let mut tui = Tui::default();
+        let mut render = |tui: &mut Tui<'_>, row, expected| -> Result<()> {
+            terminal.draw(|frame| tui.render(frame, &[], None))?;
+            let buffer = terminal.backend().buffer();
+            let line: String = (31..59)
+                .map(|column| buffer[(column, row)].symbol())
+                .collect();
+            assert_eq!(line.trim_end(), expected);
+            assert!(tui.scroll.is_none());
+            Ok(())
+        };
+
+        let key = |code, modifiers| Event::Key(KeyEvent::new(code, modifiers));
+        render(&mut tui, 1, "No model input yet")?;
+        tui.model_inputs.push(
+            "<system>\n\n<tools>lookup</tools>\n\nCompare each claim with the source notes.".into(),
+        );
+        render(&mut tui, 1, "<system>")?;
+        render(&mut tui, 3, "<tools>lookup</tools>")?;
+        tui.handle(key(KeyCode::PageDown, KeyModifiers::SHIFT));
+        render(&mut tui, 4, "source notes.")?;
+        tui.handle(key(KeyCode::PageUp, KeyModifiers::SHIFT));
+        render(&mut tui, 1, "<system>")?;
+
+        tui.model_inputs.push("<tool>Blue</tool>".into());
+        render(&mut tui, 1, "<tool>Blue</tool>")?;
+        tui.handle(key(KeyCode::Left, KeyModifiers::ALT));
+        tui.model_inputs.push("<tool>Green</tool>".into());
+        render(&mut tui, 1, "<system>")?;
+        tui.handle(key(KeyCode::Right, KeyModifiers::ALT));
+        render(&mut tui, 1, "<tool>Blue</tool>")?;
+        tui.handle(key(KeyCode::Right, KeyModifiers::ALT));
+        render(&mut tui, 1, "<tool>Green</tool>")?;
         Ok(())
     }
 

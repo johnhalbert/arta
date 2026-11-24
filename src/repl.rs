@@ -8,7 +8,7 @@ use super::markdown::TerminalOutput;
 use anyhow::{Context, Result};
 use arta::{
     agent::Agent,
-    provider::Turn,
+    provider::{PromptObserver, Turn},
     stream::{Message, Stream},
     tool::Tool,
 };
@@ -77,7 +77,11 @@ impl<'a> Repl<'a> {
         &self.history
     }
 
-    pub(super) fn reply<'b>(&'b self, prompt: &'b str) -> Stream<'b> {
+    pub(super) fn reply<'b>(
+        &'b self,
+        prompt: &'b str,
+        observer: Option<PromptObserver>,
+    ) -> Stream<'b> {
         Stream::new(
             stream::once(async {
                 let instructions = self.skills.instructions();
@@ -87,7 +91,13 @@ impl<'a> Repl<'a> {
                     .into_iter()
                     .chain(self.mcp_tools.values().cloned());
                 self.agent
-                    .chat_with_context(&self.history, prompt, &instructions, tools)
+                    .chat_with_context_observed(
+                        &self.history,
+                        prompt,
+                        &instructions,
+                        tools,
+                        observer,
+                    )
                     .await
                     .map(Message::into_stream)
             })
@@ -144,7 +154,7 @@ impl<'a> Repl<'a> {
                 let mut reply = String::new();
                 let terminal = TerminalOutput::detect();
                 let result =
-                    super::write_reply(self.reply(&prompt), &mut stdout, terminal, |chunk| {
+                    super::write_reply(self.reply(&prompt, None), &mut stdout, terminal, |chunk| {
                         reply.push_str(chunk);
                     })
                     .await;
@@ -312,7 +322,7 @@ mod tests {
         );
         assert_eq!(repl.agent.model().id(), "other model");
         assert_eq!(
-            repl.reply("Continue").try_collect::<Vec<_>>().await?,
+            repl.reply("Continue", None).try_collect::<Vec<_>>().await?,
             vec![
                 Frame::Begin,
                 Frame::Chunk("other model: 1".into()),
@@ -363,7 +373,7 @@ mod tests {
         let prompt = reset_and_prompt.prompt.as_deref().unwrap();
         assert_eq!(prompt, "Hello again");
         assert_eq!(
-            repl.reply(prompt).try_collect::<Vec<_>>().await?,
+            repl.reply(prompt, None).try_collect::<Vec<_>>().await?,
             vec![Frame::Begin, Frame::Chunk("0".into()), Frame::End]
         );
         repl.complete(Turn {
@@ -415,7 +425,7 @@ mod tests {
         }
 
         let mut repl = Repl::new(harness.agent_mut("cli", "reviewer")?, &parser, skills);
-        let plain = repl.reply("Hello").try_collect::<Vec<_>>().await?;
+        let plain = repl.reply("Hello", None).try_collect::<Vec<_>>().await?;
         assert_eq!(
             plain,
             vec![
@@ -426,6 +436,7 @@ mod tests {
         );
 
         assert!(repl.submit("$review-notes @notes".into()).prompt.is_none());
+        let active_prompt = "Use short answers.\n\n## Skill review-notes\n\nCompare each claim with the source notes.";
         for input in [
             "Check notes",
             "$review-notes Check notes @notes @notes $review-notes",
@@ -434,14 +445,22 @@ mod tests {
             let submission = repl.submit(input.into());
             let prompt = submission.prompt.as_deref().unwrap();
             assert_eq!(prompt, "Check notes");
-            let reply = repl.reply(prompt).try_collect::<Vec<_>>().await?;
-            assert_eq!(reply, vec![Frame::Begin, Frame::Chunk(
-                "Check notes\nUse short answers.\n\n## Skill review-notes\n\nCompare each claim with the source notes.\nnotes__lookup".into()
-            ), Frame::End]);
+            let reply = repl.reply(prompt, None).try_collect::<Vec<_>>().await?;
+            assert_eq!(
+                reply,
+                vec![
+                    Frame::Begin,
+                    Frame::Chunk(format!("Check notes\n{active_prompt}\nnotes__lookup")),
+                    Frame::End,
+                ]
+            );
         }
 
         assert!(repl.submit("/reset".into()).history_cleared);
-        assert_eq!(repl.reply("Hello").try_collect::<Vec<_>>().await?, plain);
+        assert_eq!(
+            repl.reply("Hello", None).try_collect::<Vec<_>>().await?,
+            plain
+        );
         Ok(())
     }
 }

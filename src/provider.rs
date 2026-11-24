@@ -14,6 +14,9 @@ pub struct Turn {
     pub reply: String,
 }
 
+/// Receives the provider's rendered text before tokenization, once per inference.
+pub type PromptObserver = Arc<dyn Fn(&str) + Send + Sync>;
+
 /// Manages models and runs inference without retaining conversation state.
 pub trait Provider: Send + Sync {
     /// Get a shared reference to a model that this provider can use for inference.
@@ -55,5 +58,17 @@ pub trait Provider: Send + Sync {
             return self.chat(model_id, history, prompt);
         }
         Box::pin(async { bail!("this provider does not support system prompts") })
+    }
+
+    /// Reply and report the rendered input when the provider supports prompt observation.
+    fn chat_observed<'a>(
+        &'a self,
+        model_id: &'a str,
+        system_prompt: Option<&'a str>,
+        history: &'a [Turn],
+        prompt: &'a str,
+        _observer: Option<PromptObserver>,
+    ) -> BoxFuture<'a, Result<Message>> {
+        self.chat_with_system(model_id, system_prompt, history, prompt)
     }
 }

@@ -4,7 +4,7 @@ mod sampling;
 mod text;
 mod tool;
 
-use super::{Provider, Turn, registry::ProviderRegistration, tool::ToolAdapter};
+use super::{PromptObserver, Provider, Turn, registry::ProviderRegistration, tool::ToolAdapter};
 use crate::{config::Config, model::Model, stream::Message};
 use anyhow::{Context, Result, bail, ensure};
 pub use config::{
@@ -158,6 +158,17 @@ impl Provider for LlamaCPP {
         history: &'a [Turn],
         prompt: &'a str,
     ) -> BoxFuture<'a, Result<Message>> {
+        self.chat_observed(model_id, system_prompt, history, prompt, None)
+    }
+
+    fn chat_observed<'a>(
+        &'a self,
+        model_id: &'a str,
+        system_prompt: Option<&'a str>,
+        history: &'a [Turn],
+        prompt: &'a str,
+        observer: Option<PromptObserver>,
+    ) -> BoxFuture<'a, Result<Message>> {
         Box::pin(async move {
             let model = self.load_model(model_id, None)?;
             let history = history.to_vec();
@@ -173,8 +184,12 @@ impl Provider for LlamaCPP {
                     return Ok(());
                 }
                 ensure!(!prompt.contains('\0'), "prompt contains a NUL character");
-                let (tokens, stops, chat) =
-                    model.prepare_prompt(system_prompt.as_deref(), &history, &prompt)?;
+                let (tokens, stops, chat) = model.prepare_prompt(
+                    system_prompt.as_deref(),
+                    &history,
+                    &prompt,
+                    observer.as_ref(),
+                )?;
                 let pieces = generate(
                     &model,
                     tokens,

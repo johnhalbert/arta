@@ -1,7 +1,10 @@
 mod template;
 
 use super::{ChatConfig, LlamaCPPModelConfig};
-use crate::{model::Model, provider::Turn};
+use crate::{
+    model::Model,
+    provider::{PromptObserver, Turn},
+};
 use anyhow::{Context, Result, ensure};
 use llama_cpp_4::prelude::{
     ChatParams, ChatTemplates, LlamaBackend, LlamaContext, LlamaContextParams, LlamaModel,
@@ -67,9 +70,16 @@ impl LlamaCPPModel {
         system_prompt: Option<&str>,
         history: &[Turn],
         prompt: &str,
+        observer: Option<&PromptObserver>,
     ) -> Result<(Vec<LlamaToken>, Vec<String>, Option<ChatParams>)> {
-        self.template
-            .prepare_prompt(&self.inner, &self.chat, system_prompt, history, prompt)
+        self.template.prepare_prompt(
+            &self.inner,
+            &self.chat,
+            system_prompt,
+            history,
+            prompt,
+            observer,
+        )
     }
 
     pub(super) fn new_context(&self, params: LlamaContextParams) -> Result<LlamaContext<'_>> {

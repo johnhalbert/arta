@@ -1,5 +1,5 @@
 use super::chat_messages;
-use crate::provider::{Turn, llama_cpp::ChatConfig};
+use crate::provider::{PromptObserver, Turn, llama_cpp::ChatConfig};
 use anyhow::{Context, Result, bail, ensure};
 use llama_cpp_4::{
     StringFromModelError,
@@ -48,6 +48,7 @@ impl ModelTemplate {
         system_prompt: Option<&str>,
         history: &[Turn],
         prompt: &str,
+        observer: Option<&PromptObserver>,
     ) -> Result<(Vec<LlamaToken>, Vec<String>, Option<ChatParams>)> {
         ensure!(
             !system_prompt.is_some_and(|prompt| prompt.contains('\0')),
@@ -65,6 +66,9 @@ impl ModelTemplate {
             let chat = templates
                 .apply(&params)
                 .context("failed to format prompt")?;
+            if let Some(observe) = observer {
+                observe(&chat.prompt);
+            }
             let tokens = chat
                 .tokenize_prompt(model, add_bos)
                 .context("failed to tokenize chat prompt")?;
@@ -96,6 +100,9 @@ impl ModelTemplate {
             transcript.push_str("\nAssistant:");
             &transcript
         };
+        if let Some(observe) = observer {
+            observe(prompt);
+        }
         let tokens = model
             .str_to_token_with_special(prompt, add_bos, Special::Plaintext)
             .context("failed to tokenize prompt")?;

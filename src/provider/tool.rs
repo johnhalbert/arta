@@ -1,4 +1,4 @@
-use super::{Provider, Turn};
+use super::{PromptObserver, Provider, Turn};
 use crate::{
     stream::Message,
     tool::{ToolArguments, ToolOutput, ToolSpec, Tools},
@@ -40,6 +40,15 @@ pub enum ToolResponse {
 /// Renders one inference step for a provider and interprets its model's response.
 pub trait ToolAdapter: Send + Sync {
     fn infer<'a>(&'a self, request: ToolRequest<'a>) -> BoxFuture<'a, Result<ToolResponse>>;
+
+    /// Run one inference step and report the rendered input if supported.
+    fn infer_observed<'a>(
+        &'a self,
+        request: ToolRequest<'a>,
+        _observer: Option<PromptObserver>,
+    ) -> BoxFuture<'a, Result<ToolResponse>> {
+        self.infer(request)
+    }
 }
 
 pub(crate) async fn send(
@@ -51,7 +60,7 @@ pub(crate) async fn send(
     if tools.is_empty() {
         return provider.send(model_id, prompt).await;
     }
-    chat(provider, model_id, None, &[], prompt, tools).await
+    chat(provider, model_id, None, &[], prompt, tools, None).await
 }
 
 pub(crate) async fn chat(
@@ -61,10 +70,11 @@ pub(crate) async fn chat(
     history: &[Turn],
     prompt: &str,
     tools: &Tools,
+    observer: Option<PromptObserver>,
 ) -> Result<Message> {
     if tools.is_empty() {
         return provider
-            .chat_with_system(model_id, system_prompt, history, prompt)
+            .chat_observed(model_id, system_prompt, history, prompt, observer)
             .await;
     }
     let specs = tools.specs();
@@ -77,14 +87,17 @@ pub(crate) async fn chat(
 
     loop {
         let response = adapter
-            .infer(ToolRequest {
-                model_id,
-                system_prompt,
-                history,
-                prompt,
-                tools: &specs,
-                exchanges: &exchanges,
-            })
+            .infer_observed(
+                ToolRequest {
+                    model_id,
+                    system_prompt,
+                    history,
+                    prompt,
+                    tools: &specs,
+                    exchanges: &exchanges,
+                },
+                observer.clone(),
+            )
             .await?;
         let (content, reasoning, calls) = match response {
             ToolResponse::Reply(reply) => return Ok(Message::new(stream::iter([Ok(reply)]))),

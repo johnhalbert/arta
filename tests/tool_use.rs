@@ -5,7 +5,7 @@ use arta::{
     harness::Harness,
     model::{Model, ModelId},
     provider::{
-        Provider,
+        PromptObserver, Provider,
         tool::{ToolAdapter, ToolCall, ToolRequest, ToolResponse},
     },
     stream::Message,
@@ -67,6 +67,25 @@ impl ToolAdapter for ToolProvider {
             })
         })
     }
+
+    fn infer_observed<'a>(
+        &'a self,
+        request: ToolRequest<'a>,
+        observer: Option<PromptObserver>,
+    ) -> BoxFuture<'a, Result<ToolResponse>> {
+        if let Some(observe) = observer {
+            let tool_result = request
+                .exchanges
+                .last()
+                .map(|step| &step.calls[0].1.content);
+            observe(&format!(
+                "<rendered:{}> {}",
+                request.tools[0].name,
+                tool_result.map_or_else(String::new, serde_json::Value::to_string)
+            ));
+        }
+        self.infer(request)
+    }
 }
 
 struct Lookup(ToolSpec);
@@ -88,7 +107,7 @@ impl Tool for Lookup {
 async fn an_agent_runs_a_tool_and_returns_the_follow_up_reply() -> Result<()> {
     let mut harness = Harness::new(&Config::default())?;
     harness.register_provider("test", || Ok(Arc::new(ToolProvider)))?;
-    harness.register_tool(Arc::new(Lookup(ToolSpec {
+    let lookup = Arc::new(Lookup(ToolSpec {
         name: "lookup".into(),
         description: "Look up a value".into(),
         input_schema: serde_json::from_value(json!({
@@ -96,7 +115,8 @@ async fn an_agent_runs_a_tool_and_returns_the_follow_up_reply() -> Result<()> {
             "properties": { "key": { "type": "string" } },
             "required": ["key"]
         }))?,
-    })))?;
+    }));
+    harness.register_tool(lookup.clone())?;
     harness.create_session_with_agents(
         "chat",
         [(
@@ -119,5 +139,25 @@ async fn an_agent_runs_a_tool_and_returns_the_follow_up_reply() -> Result<()> {
         .into_text()
         .await?;
     assert_eq!(reply, "The answer is blue.");
+
+    let (sent, mut captured) = tokio::sync::mpsc::unbounded_channel();
+    let observe = Arc::new(move |input: &str| sent.send(input.to_owned()).unwrap());
+    let reply = harness
+        .agent("chat", "agent")?
+        .chat_with_context_observed(
+            &[],
+            "favorite color",
+            "",
+            [lookup as Arc<dyn Tool>],
+            Some(observe),
+        )
+        .await?;
+    assert_eq!(captured.try_recv()?, "<rendered:lookup> ");
+    assert_eq!(
+        captured.try_recv()?,
+        r#"<rendered:lookup> {"value":"blue"}"#
+    );
+    assert!(captured.try_recv().is_err());
+    assert_eq!(reply.into_text().await?, "The answer is blue.");
     Ok(())
 }
