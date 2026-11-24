@@ -62,11 +62,13 @@ The full-screen view has two empty panes across the top and a conversation in th
 
 Type `/`, `$`, or `@` at the start of a word to see matching commands, skills, or MCP servers. Use the Up and Down arrow keys to select a suggestion, Tab to complete it, and Enter to submit. Use `/reset` to clear conversation history and active mentions, and `/exit` or Ctrl+C to quit.
 
+Use `/model` to show the current model or `/model <id>` to switch to another model configured for the current provider. Put double quotes around IDs that contain spaces. Arta unloads the current model before loading the replacement and keeps the conversation history. In an interactive session, a load failure keeps the previous selection, which Arta reloads on the next prompt.
+
 Separate slash commands from other text with whitespace. On submission, commands run from left to right and the REPL sends any remaining prompt text to the model. For example, `/reset Explain gravity` clears the conversation before sending `Explain gravity`. If the prompt contains `/exit`, the REPL exits after processing the commands.
 
 Use `$skill-name` to load a configured skill's instructions and `@server-name` to expose a configured MCP server's tools. Mentions work alongside a prompt or on their own and stay active until `/reset`. Repeating a mention reuses the active skill or tools.
 
-With redirected input or output, `arta` reads one prompt per line and writes replies to standard output. It formats each complete reply when standard output is a terminal and streams the original Markdown when standard output is redirected. `/reset`, `/exit`, and end-of-input work in this mode.
+With redirected input or output, `arta` reads one prompt per line and writes replies to standard output. It formats each complete reply when standard output is a terminal and streams the original Markdown when standard output is redirected. `/model`, `/reset`, `/exit`, and end-of-input work in this mode. Model command messages go to standard error.
 
 The current conversation counts toward the context limit. Use `/reset` to start a fresh conversation if the history fills the context.
 

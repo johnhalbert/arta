@@ -4,7 +4,7 @@ use crate::{
     stream::Message,
     tool::{Tool, Tools},
 };
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -17,7 +17,7 @@ pub struct AgentOptions<'a> {
     pub system_prompt: Option<&'a str>,
 }
 
-/// Runs prompts against a model selected when the agent is created.
+/// Runs prompts against the agent's selected model.
 pub struct Agent {
     model: Arc<dyn Model>,
     provider: Arc<dyn Provider>,
@@ -48,6 +48,18 @@ impl Agent {
 
     pub fn model(&self) -> &dyn Model {
         self.model.as_ref()
+    }
+
+    /// Switch models within the current provider while keeping the agent's settings.
+    pub async fn switch_model(&mut self, model_id: &str) -> Result<()> {
+        let provider = self.provider.clone();
+        let current_id = self.model.id().to_owned();
+        let model_id = model_id.to_owned();
+        self.model =
+            tokio::task::spawn_blocking(move || provider.switch_model(&current_id, &model_id))
+                .await
+                .context("model switch worker failed")??;
+        Ok(())
     }
 
     pub fn workspace(&self) -> Option<&Path> {

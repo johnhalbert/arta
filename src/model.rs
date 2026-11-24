@@ -5,7 +5,7 @@ pub struct ModelId<'a> {
     pub model: &'a str,
 }
 
-/// A loaded model that a provider can use for inference.
+/// The identity and metadata of a model that a provider can use for inference.
 pub trait Model: Send + Sync {
     /// The identifier that the owning provider accepts for inference.
     fn id(&self) -> &str;

@@ -49,6 +49,10 @@ async fn run_once(startup: &'static StartupConfig, prompt: &str) -> Result<()> {
 
 async fn cli_harness(startup: &'static StartupConfig, fullscreen: bool) -> Result<Cli> {
     let config = &startup.settings;
+    let model_id = ModelId {
+        provider: &config.app.provider,
+        model: &config.app.model,
+    };
     let (mut harness, skills) = spawn_blocking(move || {
         let mut quiet_config;
         let config = if fullscreen {
@@ -62,6 +66,8 @@ async fn cli_harness(startup: &'static StartupConfig, fullscreen: bool) -> Resul
             config
         };
         let mut harness = Harness::new(config)?;
+        // Load the startup model before connecting tools.
+        harness.model(model_id)?;
         let directories = config
             .skills
             .directories
@@ -83,10 +89,6 @@ async fn cli_harness(startup: &'static StartupConfig, fullscreen: bool) -> Resul
     let mcp = harness
         .connect_mcp_tools_in(config, options.workspace)
         .await?;
-    let model_id = ModelId {
-        provider: &config.app.provider,
-        model: &config.app.model,
-    };
     harness.create_session_with_agents("cli", [(startup.agent_name(), model_id, options)])?;
     Ok(Cli {
         harness,
@@ -97,7 +99,7 @@ async fn cli_harness(startup: &'static StartupConfig, fullscreen: bool) -> Resul
 
 async fn run_conversation(startup: &'static StartupConfig) -> Result<()> {
     let fullscreen = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
-    let cli = cli_harness(startup, fullscreen)
+    let mut cli = cli_harness(startup, fullscreen)
         .await
         .context("failed to start the REPL")?;
     let mut parser = repl::parser::Parser::default();
@@ -105,7 +107,7 @@ async fn run_conversation(startup: &'static StartupConfig) -> Result<()> {
     let skills = repl::skill::register(&mut parser, cli.skills);
     repl::mcp::register(&mut parser, cli.mcp);
     let mut repl = repl::Repl::new(
-        cli.harness.agent("cli", startup.agent_name())?,
+        cli.harness.agent_mut("cli", startup.agent_name())?,
         &parser,
         skills,
     );

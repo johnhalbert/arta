@@ -12,7 +12,7 @@ use std::{path::Path, sync::Arc};
 use template::ModelTemplate;
 
 pub(super) struct LlamaCPPModel {
-    id: Arc<str>,
+    pub(super) info: Arc<ModelInfo>,
     template: ModelTemplate,
     pub(super) chat: Arc<ChatConfig>,
     pub(super) inner: LlamaModel,
@@ -51,7 +51,10 @@ impl LlamaCPPModel {
         let template = ModelTemplate::from_model(&inner, chat.template.as_deref())?;
 
         Ok(Self {
-            id,
+            info: Arc::new(ModelInfo {
+                id,
+                trained_context_length: inner.n_ctx_train(),
+            }),
             template,
             chat,
             inner,
@@ -92,13 +95,19 @@ fn check_model_file(path: &Path) -> Result<()> {
     Ok(())
 }
 
-impl Model for LlamaCPPModel {
+// Agent handles retain model metadata without keeping the native weights resident.
+pub(super) struct ModelInfo {
+    id: Arc<str>,
+    trained_context_length: u32,
+}
+
+impl Model for ModelInfo {
     fn id(&self) -> &str {
         &self.id
     }
 
     fn trained_context_length(&self) -> u32 {
-        self.inner.n_ctx_train()
+        self.trained_context_length
     }
 }
 

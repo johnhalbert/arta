@@ -14,7 +14,7 @@ pub use config::{
     TensorBufferOverride,
 };
 use futures_util::{future::BoxFuture, stream};
-use llama_cpp_4::prelude::{ChatParams, LlamaBatch, LlamaToken, Special};
+use llama_cpp_4::prelude::{ChatParams, LlamaBackend, LlamaBatch, LlamaToken, Special};
 use model::LlamaCPPModel;
 use sampling::Sampler;
 pub use sampling::{LogitBias, SamplerStage, SamplingConfig};
@@ -22,7 +22,7 @@ use std::{
     cell::Cell,
     collections::{HashMap, hash_map::Entry},
     num::NonZeroU32,
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 use tokio::{
     runtime::Handle,
@@ -30,7 +30,10 @@ use tokio::{
 };
 
 pub struct LlamaCPP {
-    models: HashMap<Arc<str>, Arc<LlamaCPPModel>>,
+    models: HashMap<Arc<str>, LlamaCPPModelConfig>,
+    loaded: Mutex<HashMap<Arc<str>, Arc<LlamaCPPModel>>>,
+    backend: Option<Arc<LlamaBackend>>,
+    chat: Arc<ChatConfig>,
     inference: Arc<InferenceConfig>,
 }
 
@@ -47,7 +50,7 @@ impl LlamaCPP {
         Ok(Arc::new(Self::new(settings)?))
     }
 
-    /// Initialize the backend and load the configured models.
+    /// Initialize the backend and register models for on-demand loading.
     pub fn new(mut config: LlamaCPPConfig) -> Result<Self> {
         config.context.validate()?;
         if let Some(sampling) = &config.sampling {
@@ -55,51 +58,80 @@ impl LlamaCPP {
         }
         config.chat.load_template()?;
         let backend = config.init_backend()?;
-        let mut provider = Self {
-            models: HashMap::with_capacity(config.models.len()),
+        let mut models = HashMap::with_capacity(config.models.len());
+        for model in config.models {
+            ensure!(
+                !model.id.trim().is_empty(),
+                "model identifier cannot be empty"
+            );
+            match models.entry(Arc::from(model.id.as_str())) {
+                Entry::Vacant(entry) => {
+                    entry.insert(model);
+                }
+                Entry::Occupied(entry) => bail!("model '{}' is already registered", entry.key()),
+            }
+        }
+
+        Ok(Self {
+            models,
+            loaded: Mutex::default(),
+            backend,
+            chat: Arc::new(config.chat),
             inference: Arc::new(InferenceConfig {
                 context_length: config.context_length,
                 max_tokens: config.max_tokens,
                 context: config.context,
                 sampling: config.sampling,
             }),
-        };
-        let Some(backend) = backend else {
-            return Ok(provider);
-        };
-        let chat = Arc::new(config.chat);
-        for model in config.models {
-            ensure!(
-                !model.id.trim().is_empty(),
-                "model identifier cannot be empty"
-            );
-            let id: Arc<str> = model.id.as_str().into();
-            match provider.models.entry(Arc::clone(&id)) {
-                Entry::Vacant(entry) => {
-                    entry.insert(Arc::new(LlamaCPPModel::load(
-                        id,
-                        Arc::clone(&backend),
-                        &model,
-                        Arc::clone(&chat),
-                    )?));
-                }
-                Entry::Occupied(entry) => bail!("model '{}' is already registered", entry.key()),
-            }
-        }
-
-        Ok(provider)
+        })
     }
 
-    fn loaded_model(&self, model_id: &str) -> Result<&Arc<LlamaCPPModel>> {
-        self.models
-            .get(model_id)
-            .with_context(|| format!("unknown llama.cpp model '{model_id}'"))
+    fn load_model(&self, model_id: &str, previous: Option<&str>) -> Result<Arc<LlamaCPPModel>> {
+        let (id, config) = self
+            .models
+            .get_key_value(model_id)
+            .with_context(|| format!("unknown llama.cpp model '{model_id}'"))?;
+        // Keep inference from acquiring the old model between unloading and loading.
+        let mut loaded = self
+            .loaded
+            .lock()
+            .map_err(|_| anyhow::anyhow!("llama.cpp model cache is unavailable"))?;
+        if let Some(previous) = previous.filter(|&previous| previous != model_id)
+            && let Some(current) = loaded.get(previous)
+        {
+            ensure!(
+                Arc::strong_count(current) == 1,
+                "model '{previous}' is still in use"
+            );
+            drop(loaded.remove(previous));
+        }
+        match loaded.entry(id.clone()) {
+            Entry::Occupied(entry) => Ok(entry.get().clone()),
+            Entry::Vacant(entry) => {
+                let backend = self
+                    .backend
+                    .as_ref()
+                    .context("llama.cpp backend is unavailable")?;
+                let model = Arc::new(LlamaCPPModel::load(
+                    id.clone(),
+                    backend.clone(),
+                    config,
+                    self.chat.clone(),
+                )?);
+                entry.insert(model.clone());
+                Ok(model)
+            }
+        }
     }
 }
 
 impl Provider for LlamaCPP {
     fn model(&self, model_id: &str) -> Result<Arc<dyn Model>> {
-        Ok(self.loaded_model(model_id)?.clone())
+        Ok(self.load_model(model_id, None)?.info.clone())
+    }
+
+    fn switch_model(&self, current_id: &str, model_id: &str) -> Result<Arc<dyn Model>> {
+        Ok(self.load_model(model_id, Some(current_id))?.info.clone())
     }
 
     fn send<'a>(&'a self, model_id: &'a str, prompt: &'a str) -> BoxFuture<'a, Result<Message>> {
@@ -127,7 +159,7 @@ impl Provider for LlamaCPP {
         prompt: &'a str,
     ) -> BoxFuture<'a, Result<Message>> {
         Box::pin(async move {
-            let model = Arc::clone(self.loaded_model(model_id)?);
+            let model = self.load_model(model_id, None)?;
             let history = history.to_vec();
             let prompt = prompt.to_owned();
             let system_prompt = system_prompt.map(str::to_owned);
@@ -207,7 +239,7 @@ fn generate<'a>(
     sampling: Sampling<'a>,
     cancelled: impl Fn() -> bool + 'a,
 ) -> Result<impl Iterator<Item = Result<Vec<u8>>> + 'a> {
-    let trained_context_length = model.trained_context_length();
+    let trained_context_length = model.info.trained_context_length();
     let context_length = match config.context_length {
         None => trained_context_length.min(4096),
         Some(0) => trained_context_length,

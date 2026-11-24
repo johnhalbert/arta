@@ -22,11 +22,12 @@ pub(super) struct Submission {
     pub(super) prompt: Option<String>,
     pub(super) exit: bool,
     pub(super) history_cleared: bool,
+    pub(super) model_requests: Vec<Option<String>>,
 }
 
 /// Owns the conversation shared by the terminal and line-based interfaces.
 pub(super) struct Repl<'a> {
-    agent: &'a Agent,
+    agent: &'a mut Agent,
     parser: &'a Parser,
     history: Vec<Turn>,
     skills: skill::Skills,
@@ -34,7 +35,7 @@ pub(super) struct Repl<'a> {
 }
 
 impl<'a> Repl<'a> {
-    pub(super) fn new(agent: &'a Agent, parser: &'a Parser, skills: skill::Skills) -> Self {
+    pub(super) fn new(agent: &'a mut Agent, parser: &'a Parser, skills: skill::Skills) -> Self {
         Self {
             agent,
             parser,
@@ -50,6 +51,26 @@ impl<'a> Repl<'a> {
 
     pub(super) fn parser(&self) -> &'a Parser {
         self.parser
+    }
+
+    pub(super) async fn apply_model_requests(
+        &mut self,
+        requests: Vec<Option<String>>,
+    ) -> Result<Option<String>> {
+        let mut status = None;
+        for request in requests {
+            let label = if let Some(id) = request {
+                self.agent
+                    .switch_model(&id)
+                    .await
+                    .with_context(|| format!("failed to switch to model '{id}'"))?;
+                "Switched to model"
+            } else {
+                "Current model is"
+            };
+            status = Some(format!("{label} '{}'", self.agent.model().id()));
+        }
+        Ok(status)
     }
 
     pub(super) fn history(&self) -> &[Turn] {
@@ -85,7 +106,7 @@ impl<'a> Repl<'a> {
         let mut stderr = io::stderr();
         if interactive {
             stderr
-                .write_all(b"Enter a prompt, /reset to clear the conversation, or /exit to quit.\n")
+                .write_all(b"Enter a prompt, /model <id> to switch models, /reset to clear the conversation, or /exit to quit.\n")
                 .await?;
         }
         loop {
@@ -103,6 +124,21 @@ impl<'a> Repl<'a> {
             let submission = self.submit(line);
             if submission.exit {
                 break;
+            }
+            match self.apply_model_requests(submission.model_requests).await {
+                Ok(Some(status)) => {
+                    stderr.write_all(format!("{status}\n").as_bytes()).await?;
+                    stderr.flush().await?;
+                }
+                Ok(None) => {}
+                Err(error) if !interactive => return Err(error),
+                Err(error) => {
+                    stderr
+                        .write_all(format!("error: {error:#}\n").as_bytes())
+                        .await?;
+                    stderr.flush().await?;
+                    continue;
+                }
             }
             if let Some(prompt) = submission.prompt {
                 let mut reply = String::new();
@@ -151,11 +187,11 @@ mod tests {
     use futures_util::future::BoxFuture;
     use std::path::PathBuf;
 
-    struct TestProvider;
+    struct TestProvider(&'static str);
 
     impl Model for TestProvider {
         fn id(&self) -> &str {
-            "test"
+            self.0
         }
 
         fn trained_context_length(&self) -> u32 {
@@ -164,8 +200,16 @@ mod tests {
     }
 
     impl Provider for TestProvider {
-        fn model(&self, _: &str) -> Result<Arc<dyn Model>> {
-            Ok(Arc::new(Self))
+        fn model(&self, id: &str) -> Result<Arc<dyn Model>> {
+            match id {
+                "test" => Ok(Arc::new(Self("test"))),
+                "other model" => Ok(Arc::new(Self("other model"))),
+                _ => anyhow::bail!("unknown model '{id}'"),
+            }
+        }
+
+        fn switch_model(&self, _: &str, id: &str) -> Result<Arc<dyn Model>> {
+            self.model(id)
         }
 
         fn send<'a>(&'a self, _: &'a str, _: &'a str) -> BoxFuture<'a, Result<Message>> {
@@ -178,13 +222,17 @@ mod tests {
 
         fn chat_with_system<'a>(
             &'a self,
-            _: &'a str,
+            model_id: &'a str,
             system_prompt: Option<&'a str>,
             history: &'a [Turn],
             _: &'a str,
         ) -> BoxFuture<'a, Result<Message>> {
             assert_eq!(system_prompt, Some("Use short answers."));
-            let reply = history.len().to_string();
+            let reply = if model_id == "test" {
+                history.len().to_string()
+            } else {
+                format!("{model_id}: {}", history.len())
+            };
             Box::pin(async { Ok(Message::new(stream::iter([Ok(reply)]))) })
         }
     }
@@ -221,7 +269,7 @@ mod tests {
 
     pub(super) fn test_harness() -> Result<Harness> {
         let mut harness = Harness::new(&Config::default())?;
-        harness.register_provider("test", || Ok(Arc::new(TestProvider)))?;
+        harness.register_provider("test", || Ok(Arc::new(TestProvider("test"))))?;
         harness.create_session_with_agents(
             "cli",
             [(
@@ -240,12 +288,61 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reset_clears_history_and_keeps_the_system_prompt() -> Result<()> {
-        let harness = test_harness()?;
+    async fn model_command_switches_before_the_prompt_and_keeps_history() -> Result<()> {
+        let mut harness = test_harness()?;
         let mut parser = Parser::default();
         command::register(&mut parser);
         let mut repl = Repl::new(
-            harness.agent("cli", "reviewer")?,
+            harness.agent_mut("cli", "reviewer")?,
+            &parser,
+            Default::default(),
+        );
+        repl.complete(Turn {
+            prompt: "First prompt".into(),
+            reply: "First reply".into(),
+        });
+
+        let submission = repl.submit("/model \"other model\" Continue".into());
+        assert_eq!(submission.prompt.as_deref(), Some("Continue"));
+        assert_eq!(
+            repl.apply_model_requests(submission.model_requests)
+                .await?
+                .as_deref(),
+            Some("Switched to model 'other model'")
+        );
+        assert_eq!(repl.agent.model().id(), "other model");
+        assert_eq!(
+            repl.reply("Continue").try_collect::<Vec<_>>().await?,
+            vec![
+                Frame::Begin,
+                Frame::Chunk("other model: 1".into()),
+                Frame::End
+            ]
+        );
+
+        let invalid = repl.submit("/model missing".into());
+        assert!(
+            repl.apply_model_requests(invalid.model_requests)
+                .await
+                .is_err()
+        );
+        let query = repl.submit("/model".into());
+        assert_eq!(
+            repl.apply_model_requests(query.model_requests)
+                .await?
+                .as_deref(),
+            Some("Current model is 'other model'")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reset_clears_history_and_keeps_the_system_prompt() -> Result<()> {
+        let mut harness = test_harness()?;
+        let mut parser = Parser::default();
+        command::register(&mut parser);
+        let mut repl = Repl::new(
+            harness.agent_mut("cli", "reviewer")?,
             &parser,
             Default::default(),
         );
@@ -283,7 +380,7 @@ mod tests {
 
     #[tokio::test]
     async fn mentions_complete_and_add_conversation_context_once() -> Result<()> {
-        let harness = test_harness()?;
+        let mut harness = test_harness()?;
         let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/skills");
         let mut parser = Parser::default();
         command::register(&mut parser);
@@ -317,7 +414,7 @@ mod tests {
             assert_eq!(input, expected);
         }
 
-        let mut repl = Repl::new(harness.agent("cli", "reviewer")?, &parser, skills);
+        let mut repl = Repl::new(harness.agent_mut("cli", "reviewer")?, &parser, skills);
         let plain = repl.reply("Hello").try_collect::<Vec<_>>().await?;
         assert_eq!(
             plain,

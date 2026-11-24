@@ -19,7 +19,7 @@ pub(crate) fn register(parser: &mut Parser, catalog: Option<Arc<ActivateSkill>>)
                 DELIMITER,
                 format!("{DELIMITER}{name}"),
                 description.into(),
-                move |context, prompt| {
+                move |context, _, prompt| {
                     context.activate_skill(&name);
                     Some(prompt)
                 },

@@ -19,6 +19,11 @@ pub trait Provider: Send + Sync {
     /// Get a shared reference to a model that this provider can use for inference.
     fn model(&self, model_id: &str) -> Result<Arc<dyn Model>>;
 
+    /// Release the current model's resources before loading its replacement.
+    fn switch_model(&self, _current_id: &str, _model_id: &str) -> Result<Arc<dyn Model>> {
+        bail!("this provider does not support model switching")
+    }
+
     fn send<'a>(&'a self, model_id: &'a str, prompt: &'a str) -> BoxFuture<'a, Result<Message>>;
 
     fn tool_adapter(&self) -> Option<&dyn tool::ToolAdapter> {

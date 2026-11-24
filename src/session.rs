@@ -42,6 +42,12 @@ impl Session {
             .with_context(|| format!("unknown agent '{agent_id}'"))
     }
 
+    pub(crate) fn agent_mut(&mut self, agent_id: &str) -> Result<&mut Agent> {
+        self.agents
+            .get_mut(agent_id)
+            .with_context(|| format!("unknown agent '{agent_id}'"))
+    }
+
     /// Read complete input messages and stream each reply before reading the next message.
     /// Dropping the reply stream also drops the input stream and any active reply.
     pub fn stream<'a>(&'a self, agent_id: &str, input: Stream<'a>) -> Result<Stream<'a>> {

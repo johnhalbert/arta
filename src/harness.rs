@@ -72,7 +72,7 @@ impl Harness {
         Ok(self.provider_handle(provider_id)?.as_ref())
     }
 
-    /// Get a shared reference to a model owned by a registered provider.
+    /// Get a shared handle for a model from a registered provider.
     pub fn model(&self, model: ModelId<'_>) -> Result<Arc<dyn Model>> {
         self.provider(model.provider)?.model(model.model)
     }
@@ -164,6 +164,13 @@ impl Harness {
 
     pub fn agent(&self, session_id: &str, agent_id: &str) -> Result<&Agent> {
         self.session(session_id)?.agent(agent_id)
+    }
+
+    pub fn agent_mut(&mut self, session_id: &str, agent_id: &str) -> Result<&mut Agent> {
+        self.sessions
+            .get_mut(session_id)
+            .with_context(|| format!("unknown session '{session_id}'"))?
+            .agent_mut(agent_id)
     }
 
     /// Drop a session and its agents. The harness continues to own its providers.

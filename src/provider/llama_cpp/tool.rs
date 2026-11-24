@@ -21,7 +21,7 @@ impl ToolAdapter for LlamaCPP {
                     .is_some_and(|prompt| prompt.contains('\0')),
                 "system prompt contains a NUL character"
             );
-            let model = Arc::clone(self.loaded_model(request.model_id)?);
+            let model = self.load_model(request.model_id, None)?;
             let (messages, tools) = tool_prompt(&request);
             let inference = Arc::clone(&self.inference);
             let previous_calls: usize = request.exchanges.iter().map(|turn| turn.calls.len()).sum();

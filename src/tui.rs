@@ -53,6 +53,22 @@ pub(super) async fn run(repl: &mut Repl<'_>) -> Result<()> {
                     tui.failure = None;
                     tui.scroll = None;
                 }
+                if !submission.model_requests.is_empty() {
+                    tui.failure = None;
+                    tui.scroll = None;
+                }
+                if submission.model_requests.iter().any(Option::is_some) {
+                    tui.model_status = Some(Ok("Switching model…".into()));
+                    screen.draw(|frame| tui.render(frame, repl.history(), None))?;
+                }
+                tui.model_status = match repl.apply_model_requests(submission.model_requests).await
+                {
+                    Ok(status) => status.map(Ok),
+                    Err(error) => {
+                        tui.model_status = Some(Err(format!("{error:#}")));
+                        continue;
+                    }
+                };
                 if let Some(prompt) = submission.prompt
                     && !tui.respond(repl, prompt, &mut events, &mut screen).await?
                 {
@@ -117,6 +133,7 @@ struct Tui<'a> {
     page: u16,
     busy_frame: usize,
     failure: Option<(Turn, String)>,
+    model_status: Option<Result<String, String>>,
 }
 
 impl<'a> Tui<'a> {
@@ -258,6 +275,12 @@ impl<'a> Tui<'a> {
         let mut lines = Vec::new();
         for turn in history {
             append_turn(&mut lines, turn, transcript.width);
+        }
+        if let Some(status) = &self.model_status {
+            match status {
+                Ok(message) => lines.extend(display_lines(message).map(|line| line.cyan())),
+                Err(error) => lines.extend(display_lines(error).map(|line| line.red())),
+            }
         }
         if let Some(turn) = pending {
             append_turn(&mut lines, turn, transcript.width);
@@ -599,19 +622,21 @@ mod tests {
         terminal.draw(|frame| tui.render(frame, &history, None))?;
         let buffer = terminal.backend().buffer();
         assert_eq!(tui.page, page);
-        assert_eq!(buffer[(0, 18)].symbol(), "F");
-        assert_eq!(buffer[(25, 19)].symbol(), " ");
+        assert_ne!(buffer[(25, 19)].symbol(), "x");
         assert_eq!(buffer[(40, 19)].symbol(), "x");
-        let first: String = (0..5).map(|column| buffer[(column, 19)].symbol()).collect();
-        let second: String = (0..6).map(|column| buffer[(column, 20)].symbol()).collect();
+        let first: String = (0..5).map(|column| buffer[(column, 18)].symbol()).collect();
+        let second: String = (0..6).map(|column| buffer[(column, 19)].symbol()).collect();
+        let third: String = (0..6).map(|column| buffer[(column, 20)].symbol()).collect();
         assert_eq!(first, "/exit");
-        assert_eq!(second, "/reset");
+        assert_eq!(second, "/model");
+        assert_eq!(third, "/reset");
         assert!(
-            buffer[(0, 19)]
+            buffer[(0, 18)]
                 .modifier
                 .contains(ratatui::style::Modifier::REVERSED)
         );
 
+        tui.handle(key(KeyCode::Down));
         tui.handle(key(KeyCode::Down));
         tui.handle(key(KeyCode::Tab));
         assert_eq!(tui.input.text, "/reset ");

@@ -9,7 +9,7 @@ pub(crate) fn register(parser: &mut Parser, servers: McpTools) {
             DELIMITER,
             format!("{DELIMITER}{name}"),
             "Enable MCP server tools".into(),
-            move |context, prompt| {
+            move |context, _, prompt| {
                 context.expose_mcp_tools(&tools);
                 Some(prompt)
             },
