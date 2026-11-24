@@ -1,3 +1,6 @@
+//! Installs a native callback shared by llama.cpp and uses thread-local scopes to decide
+//! which worker's diagnostic bytes reach stderr.
+
 use std::{cell::Cell, ffi::CStr, io::Write, os::raw::c_char, ptr};
 
 thread_local! {
@@ -10,6 +13,8 @@ pub(super) fn install() {
     unsafe { llama_cpp_sys_4::llama_log_set(Some(log), ptr::null_mut()) };
 }
 
+/// Write native diagnostic bytes only while this thread's verbose scope is active. The native
+/// callback supplies a NUL-terminated string valid during the call.
 unsafe extern "C" fn log(
     _: llama_cpp_sys_4::ggml_log_level,
     text: *const c_char,
@@ -22,9 +27,11 @@ unsafe extern "C" fn log(
     }
 }
 
+/// RAII guard restoring the previous thread-local verbosity on return or unwind.
 pub(super) struct Scope(bool);
 
 impl Scope {
+    /// Replace the calling thread's flag and retain its previous value for restoration.
     pub(super) fn new(verbose: bool) -> Self {
         Self(VERBOSE.replace(verbose))
     }

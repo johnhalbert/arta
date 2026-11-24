@@ -1,3 +1,7 @@
+//! Model Context Protocol client adapter. Startup registers discovered tools with the
+//! harness. Workflow nodes use the same discovery code in their profile's workspace. Each
+//! tool retains its remote name and a shared running connection.
+
 use crate::tool::{Tool, ToolArguments, ToolOutput, ToolSpec, Tools};
 use anyhow::{Context, Result, ensure};
 use futures_util::future::BoxFuture;
@@ -22,15 +26,20 @@ use std::{
 };
 use tokio::{process::Command, time::timeout};
 
+/// Connections keyed by the names used in profiles and REPL mentions.
 #[derive(Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct McpConfig {
+    /// Servers visited in name order during startup discovery.
     pub servers: BTreeMap<String, McpServerConfig>,
 }
 
+/// Discovered handles grouped by server so a mention can expose a whole group.
 pub type McpTools = BTreeMap<String, Vec<Arc<dyn Tool>>>;
 
 impl McpConfig {
+    /// Connect servers sequentially and register their handles. The harness stages these
+    /// changes on a registry copy before publishing them.
     pub(crate) async fn register(
         &self,
         directory: &Path,
@@ -52,26 +61,40 @@ impl McpConfig {
     }
 }
 
+/// Untagged TOML transport configuration selected by the presence of a command or URL.
 #[derive(Clone, Deserialize)]
 #[serde(untagged, deny_unknown_fields)]
 pub enum McpServerConfig {
+    /// Launch a local process and speak MCP over its stdin and stdout.
     Stdio {
+        /// Executable name for PATH lookup or a path resolved against the configuration
+        /// directory.
         command: PathBuf,
+        /// Arguments passed directly to the child process.
         #[serde(default)]
         args: Vec<String>,
+        /// Environment entries added to or overriding the inherited child environment.
         #[serde(default)]
         env: BTreeMap<String, String>,
+        /// Allowlist of original remote names. Omission exposes all advertised tools.
         tools: Option<Vec<String>>,
     },
+    /// Connect a Streamable HTTP client to the configured service.
     Http {
+        /// Endpoint passed to the transport.
         url: String,
+        /// Environment variable read at connection time for the bearer token.
         bearer_token_env: Option<String>,
+        /// Optional allowlist applied to the names returned by discovery.
         tools: Option<Vec<String>>,
     },
 }
 
+/// Deadline for one server's startup, MCP handshake, and complete tool listing together.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Deadline for one remote function invocation.
 const CALL_TIMEOUT: Duration = Duration::from_secs(60);
+/// Negotiated rmcp client service shared by tools discovered from one server.
 type Connection = RunningService<RoleClient, ClientConfig>;
 
 impl McpServerConfig {
@@ -80,6 +103,8 @@ impl McpServerConfig {
         self.connect_in(name, directory, directory).await
     }
 
+    /// Validate the server name and bound the entire handshake and tool listing to 30
+    /// seconds.
     pub(crate) async fn connect_in(
         &self,
         name: &str,
@@ -98,6 +123,8 @@ impl McpServerConfig {
             .context("MCP connection or tool discovery timed out")?
     }
 
+    /// Start the transport, negotiate the client lifecycle, list tools, and check every
+    /// allowlisted name. Preserve the remote dispatch name while prefixing the local name.
     async fn discover(
         &self,
         name: &str,
@@ -195,9 +222,14 @@ impl McpServerConfig {
     }
 }
 
+/// One advertised schema and a shared transport. Calls use a 60-second timeout and prefer
+/// structured content over newline-joined text blocks.
 struct McpTool {
+    /// Locally prefixed name with the remote description and input schema.
     spec: ToolSpec,
+    /// Server's original function name, preserved across local aliasing.
     remote_name: String,
+    /// Keeps the negotiated transport alive while any discovered handle retains it.
     connection: Arc<Connection>,
 }
 

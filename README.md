@@ -2,6 +2,8 @@
 
 `arta` uses llama.cpp to run one-shot prompts, interactive conversations, and workflows with local GGUF models.
 
+For a guided tour of the code, follow a request from startup through model loading, tool calls, workflow execution, and terminal output in the [architecture guide](ARCHITECTURE.md#reading-paths).
+
 ## Build and run on Windows
 
 To build `arta`, you need Rust, CMake, a C++ compiler, and LLVM's `libclang`. On Windows, use the Visual Studio C++ Build Tools. The default build enables CUDA and requires the NVIDIA CUDA Toolkit.

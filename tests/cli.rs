@@ -1,3 +1,6 @@
+//! Process-level CLI contracts. These tests launch the built binary and inspect exit status
+//! and stderr for mode selection, invalid arguments, empty stdin, and model-loading failures.
+
 use std::{
     path::Path,
     process::{Command, Stdio},

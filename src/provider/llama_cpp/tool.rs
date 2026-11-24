@@ -1,3 +1,7 @@
+//! The llama.cpp implementation of structured inference. It renders schemas and call history
+//! through the chat template, buffers an entire generation on a blocking worker, then parses
+//! it into a reply or callable batch.
+
 use super::{
     LlamaCPP, Sampling, generate, logging, model::chat_messages_with, text::text_chunks_with_stop,
 };
@@ -26,6 +30,9 @@ impl ToolAdapter for LlamaCPP {
         self.infer_recorded(request, &[], observer)
     }
 
+    /// Replay exchanges by turn, capture the rendered prompt, and generate with template
+    /// grammar and raw token bytes. Dropping the awaiting future closes a cancellation
+    /// channel checked by the worker.
     fn infer_recorded<'a>(
         &'a self,
         request: ToolRequest<'a>,
@@ -107,6 +114,8 @@ impl ToolAdapter for LlamaCPP {
     }
 }
 
+/// Serialize role messages and function schemas separately. Replay prior exchanges at their
+/// original turns and append current exchanges after this user prompt.
 fn tool_prompt(
     request: &ToolRequest<'_>,
     past_exchanges: &[Vec<ToolExchange>],
@@ -142,6 +151,8 @@ fn tool_prompt(
     )
 }
 
+/// Write each assistant call batch followed by tool-role results referencing the original
+/// call IDs. Prefix recoverable tool errors in the text sent to the model.
 fn append_exchanges(messages: &mut Vec<Value>, exchanges: &[ToolExchange]) {
     for exchange in exchanges {
         let calls: Vec<_> = exchange
@@ -187,26 +198,39 @@ fn append_exchanges(messages: &mut Vec<Value>, exchanges: &[ToolExchange]) {
     }
 }
 
+/// Shape returned by the native chat parser. Missing calls default to an ordinary text reply.
 #[derive(Deserialize)]
 struct AssistantResponse {
+    /// Final assistant text or text accompanying a batch of calls.
     content: Option<String>,
+    /// Optional template-parsed reasoning retained when replaying a call batch.
     reasoning_content: Option<String>,
+    /// Parsed calls in model order. Absence is deserialized as an empty list.
     #[serde(default)]
     tool_calls: Vec<AssistantCall>,
 }
 
+/// Native parser's function invocation and optional template-supplied correlation ID.
 #[derive(Deserialize)]
 struct AssistantCall {
+    /// Optional correlation ID. The adapter synthesizes one when absent or empty.
     id: Option<String>,
+    /// The function descriptor to convert into an executable Arta call.
     function: AssistantFunction,
 }
 
+/// Function name and JSON-encoded argument string as emitted by the parser.
 #[derive(Deserialize)]
 struct AssistantFunction {
+    /// Name matched against the turn's visible tool registry.
     name: String,
+    /// Serialized JSON decoded into a string-keyed object before any tool executes.
     arguments: String,
 }
 
+/// Parse arguments as objects, synthesize missing IDs from the cumulative call count, and
+/// reject a call batch cut off at the token limit. A text-only result may use the full
+/// budget.
 fn parse_response(parsed: &str, previous_calls: usize, exhausted: bool) -> Result<ToolResponse> {
     let response: AssistantResponse =
         serde_json::from_str(parsed).context("invalid llama.cpp assistant message")?;

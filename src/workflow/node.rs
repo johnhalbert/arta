@@ -1,3 +1,6 @@
+//! Structural validation of the workflow tree uses a shared ID set at every depth. This makes
+//! node IDs suitable keys for conversation histories.
+
 use anyhow::{Result, ensure};
 use serde::Deserialize;
 use std::collections::HashSet;
@@ -6,11 +9,26 @@ use std::collections::HashSet;
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Node {
-    Agent { id: String, agent: String },
-    Loop { id: String, nodes: Vec<Node> },
+    /// Invoke the named Markdown profile. The node ID identifies this leaf's conversation
+    /// across visits.
+    Agent {
+        /// Unique key used for this node's history and progress events.
+        id: String,
+        /// Filename stem of the Markdown profile in the workflow directory.
+        agent: String,
+    },
+    /// Repeat an ordered nonempty sequence until its deciding agent calls the break tool.
+    Loop {
+        /// Unique key identifying the loop in iteration paths and control calls.
+        id: String,
+        /// Children in execution order. The deepest final leaf decides whether to repeat.
+        nodes: Vec<Node>,
+    },
 }
 
 impl Node {
+    /// Walk depth first, rejecting empty sequences, blank IDs, and duplicate IDs throughout
+    /// the tree. Call the visitor once per agent leaf to resolve its profile.
     pub(crate) fn visit_sequence<'a>(
         nodes: &'a [Self],
         ids: &mut HashSet<&'a str>,

@@ -1,3 +1,6 @@
+//! An agent binds one provider and model to a workspace, base instructions, and tool
+//! snapshot. Turn history belongs to the calling REPL, workflow node, or library client.
+
 use crate::{
     model::Model,
     provider::{PromptObserver, Provider, Turn, tool},
@@ -14,20 +17,30 @@ use std::{
 /// Settings attached to a named agent in a session.
 #[derive(Clone, Copy, Default)]
 pub struct AgentOptions<'a> {
+    /// Directory used when connecting local MCP processes for this profile.
     pub workspace: Option<&'a Path>,
+    /// Base instructions prepended to each chat, including turns with additional skill
+    /// instructions.
     pub system_prompt: Option<&'a str>,
 }
 
 /// Runs prompts against the agent's selected model.
 pub struct Agent {
+    /// Selection updated after a successful switch. Inference passes its provider-local ID.
     model: Arc<dyn Model>,
+    /// Shared implementation used for inference, switching, and resource release.
     provider: Arc<dyn Provider>,
+    /// Registry snapshot captured at binding time, used for prompts and recorded turns.
     tools: Arc<Tools>,
+    /// Owned copy of the optional profile directory.
     workspace: Option<PathBuf>,
+    /// Base instructions preserved across prompts and model switches.
     system_prompt: Option<String>,
 }
 
 impl Agent {
+    /// Clone borrowed profile settings into the binding and share the supplied provider,
+    /// metadata, and tools.
     pub(crate) fn new(
         provider: Arc<dyn Provider>,
         model: Arc<dyn Model>,
@@ -43,10 +56,13 @@ impl Agent {
         }
     }
 
+    /// Borrow the provider currently responsible for inference and model switching.
     pub fn provider(&self) -> &dyn Provider {
         self.provider.as_ref()
     }
 
+    /// Borrow metadata for the selection. The llama.cpp implementation keeps the heavyweight
+    /// model in its provider cache.
     pub fn model(&self) -> &dyn Model {
         self.model.as_ref()
     }
@@ -63,6 +79,7 @@ impl Agent {
         Ok(())
     }
 
+    /// Borrow the workspace copied into this binding at creation.
     pub fn workspace(&self) -> Option<&Path> {
         self.workspace.as_deref()
     }
@@ -132,6 +149,8 @@ impl Agent {
         .await
     }
 
+    /// Run one workflow turn with the binding's tools. Replay earlier per-turn exchanges
+    /// through the adapter and return the new exchanges for the node to retain.
     pub(crate) async fn chat_recorded(
         &self,
         history: &[Turn],
@@ -158,6 +177,8 @@ impl Agent {
         .await
     }
 
+    /// Join profile and per-turn instructions with a blank line. Borrow the existing text
+    /// when only one source supplies it.
     fn system_prompt_with<'a>(&'a self, instructions: &'a str) -> Option<Cow<'a, str>> {
         match self.system_prompt.as_deref() {
             base if instructions.is_empty() => base.map(Cow::Borrowed),
@@ -166,6 +187,8 @@ impl Agent {
         }
     }
 
+    /// Pass an explicitly selected registry and caller-owned history to the
+    /// provider-independent tool loop.
     async fn chat_with_tools(
         &self,
         history: &[Turn],

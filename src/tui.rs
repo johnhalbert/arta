@@ -1,3 +1,7 @@
+//! Fullscreen event loop. Terminal input, rendered model prompts, and asynchronous reply
+//! frames update UI state independently. The REPL owns ordinary chat history. Workflow
+//! transcripts and incomplete replies stay in the display layer.
+
 mod workflow;
 
 use self::workflow::{WorkflowPane, WorkflowTranscript};
@@ -41,8 +45,12 @@ use tokio::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
+/// Activity indicator indexed by elapsed time while a visit awaits output.
 const BUSY_FRAMES: [&str; 6] = [".", "..", "...", " ..", "  .", ""];
 
+/// Enter the alternate screen, render the idle editor, and dispatch submissions. A pending
+/// workflow consumes one prompt. Ordinary chat and workflows each have a response loop that
+/// continues polling the keyboard.
 pub(super) async fn run(repl: &mut Repl<'_>, config: &Config) -> Result<()> {
     let mut screen = Screen::enter()?;
     let mut events = EventStream::new();
@@ -111,12 +119,15 @@ pub(super) async fn run(repl: &mut Repl<'_>, config: &Config) -> Result<()> {
     Ok(())
 }
 
+/// Ratatui terminal drawing through Crossterm on standard output.
 type Console = Terminal<CrosstermBackend<io::Stdout>>;
 
 /// Restores the shell's screen and input modes on exit, including on errors.
 struct Screen(Console);
 
 impl Screen {
+    /// Enable raw mode and enter the alternate screen, tolerating unsupported bracketed
+    /// paste. The guard restores the terminal on subsequent errors.
     fn enter() -> io::Result<Self> {
         let terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
         enable_raw_mode()?;
@@ -131,6 +142,7 @@ impl Screen {
         Ok(screen)
     }
 
+    /// Draw one frame against the guarded terminal, propagating backend errors.
     fn draw(&mut self, render: impl FnOnce(&mut Frame<'_>)) -> io::Result<()> {
         self.0.draw(render)?;
         Ok(())
@@ -149,28 +161,44 @@ impl Drop for Screen {
     }
 }
 
+/// Effect of one terminal event on the outer submission loop.
 enum InputEvent {
+    /// Repaint or keep waiting after handling local editor and navigation state.
     Continue,
+    /// Exit the interface, dropping any currently polled reply stream.
     Quit,
+    /// Process the current editor buffer in the idle submission loop.
     Submit,
 }
 
+/// Editor, pane scroll state, in-flight feedback, and display-only workflow transcripts for
+/// one fullscreen session.
 #[derive(Default)]
 struct Tui<'a> {
+    /// Editable text, grapheme-aware cursor, and current completion selection.
     input: Editor<'a>,
     /// A fixed top row while reading back. None follows the newest text.
     scroll: Option<u16>,
+    /// First wrapped row of the transcript's bottommost viewport.
     latest: u16,
+    /// Chat scroll increment in wrapped rows, leaving one row of overlap where possible.
     page: u16,
+    /// Rendered input captures for the current turn or workflow node.
     model_inputs: ModelInputs,
+    /// Current position in the waiting indicator animation.
     busy_frame: usize,
+    /// Partial ordinary turn and error retained for display after failed inference.
     failure: Option<(Turn, String)>,
+    /// Transient command status or error shown in the transcript.
     model_status: Option<Result<String, String>>,
+    /// Outline for the selected or most recently run workflow.
     workflow: Option<WorkflowPane>,
+    /// Display-only workflow transcripts anchored among ordinary chat turns.
     workflow_history: Vec<WorkflowTranscript>,
 }
 
 impl<'a> Tui<'a> {
+    /// Build the editor's completion list from the parser used for submission.
     fn new(parser: &'a Parser) -> Self {
         Self {
             input: Editor {
@@ -181,6 +209,8 @@ impl<'a> Tui<'a> {
         }
     }
 
+    /// Route navigation and editing keys, replace pasted control characters with spaces, and
+    /// signal submission or exit to the caller.
     fn handle(&mut self, event: Event) -> InputEvent {
         match event {
             Event::Paste(text) => {
@@ -251,6 +281,9 @@ impl<'a> Tui<'a> {
         InputEvent::Continue
     }
 
+    /// Drive the run alongside keyboard input and refresh ticks. Apply status events
+    /// immediately and coalesce output redraws. Preserve an error with the partial workflow
+    /// transcript.
     async fn respond_workflow(
         &mut self,
         repl: &mut Repl<'_>,
@@ -315,6 +348,8 @@ impl<'a> Tui<'a> {
         Ok(true)
     }
 
+    /// Project a node event into the outline and transcript. Reset captured model inputs at
+    /// each node start and record control calls beside that node's output.
     fn workflow_event(&mut self, event: WorkflowEvent) {
         let (Some(workflow), Some(transcript)) =
             (&mut self.workflow, self.workflow_history.last_mut())
@@ -355,6 +390,8 @@ impl<'a> Tui<'a> {
         }
     }
 
+    /// Poll reply frames, observed prompts, input events, and a repaint timer together. Drain
+    /// queued prompt captures on completion and commit only a successful turn to the REPL.
     async fn respond(
         &mut self,
         repl: &mut Repl<'_>,
@@ -428,6 +465,8 @@ impl<'a> Tui<'a> {
         Ok(true)
     }
 
+    /// Interleave display-only workflow transcripts at their chat history offsets, then lay
+    /// out the input inspector, workflow outline, transcript, editor, and completions.
     fn render(&mut self, frame: &mut Frame<'_>, history: &[Turn], pending: Option<&Turn>) {
         let area = frame.area();
         let [upper, chat] =
@@ -547,16 +586,25 @@ impl<'a> Tui<'a> {
     }
 }
 
+/// Rendered prompts for the current chat turn or workflow node, with one selected step and
+/// its wrapped scroll position.
 #[derive(Default)]
 struct ModelInputs {
+    /// Rendered strings in inference-step order for the current inspected turn or node.
     prompts: Vec<String>,
+    /// Index of the inspected prompt, zero when the pane is empty.
     selected: usize,
+    /// Top wrapped row of the selected prompt.
     scroll: u16,
+    /// Highest valid scroll offset computed for the current pane dimensions.
     last_row: u16,
+    /// Vertical scroll increment for the inspector.
     page: u16,
 }
 
 impl ModelInputs {
+    /// Append one observed prompt and follow it only when the reader was already viewing the
+    /// latest step.
     fn push(&mut self, prompt: String) {
         let follows_latest = self.selected == self.prompts.len().saturating_sub(1);
         self.prompts.push(prompt);
@@ -565,6 +613,8 @@ impl ModelInputs {
         }
     }
 
+    /// Clamp the selected step to the available range and reset its scroll when the selection
+    /// changes.
     fn select(&mut self, index: usize) {
         let index = index.min(self.prompts.len().saturating_sub(1));
         if index != self.selected {
@@ -573,6 +623,8 @@ impl ModelInputs {
         }
     }
 
+    /// Wrap the selected model input and clamp scroll to the number of rows that fit the
+    /// inspector.
     fn render(&mut self, frame: &mut Frame<'_>, area: Rect) {
         let multiple = self.prompts.len() > 1;
         let title = if multiple {
@@ -613,6 +665,8 @@ impl ModelInputs {
     }
 }
 
+/// Bottom-align short transcripts and clamp scroll in wrapped rows. Return to follow mode
+/// when the viewport reaches the latest row.
 fn render_transcript(
     frame: &mut Frame<'_>,
     mut area: Rect,
@@ -634,6 +688,7 @@ fn render_transcript(
     (latest, (offset < latest).then_some(offset))
 }
 
+/// Draw the user's input as literal lines and render the assistant's text as Markdown.
 fn append_turn<'a>(lines: &mut Vec<Line<'a>>, turn: &'a Turn, width: u16) {
     if !lines.is_empty() {
         lines.push(Line::default());
@@ -644,31 +699,41 @@ fn append_turn<'a>(lines: &mut Vec<Line<'a>>, turn: &'a Turn, width: u16) {
     lines.extend(markdown::render(&turn.reply, width));
 }
 
+/// Split literal text at line boundaries and strip terminal controls from each line.
 fn display_lines(text: &str) -> impl Iterator<Item = Line<'_>> {
     text.lines()
         .map(|line| Line::raw(markdown::clean_terminal_text(line)))
 }
 
+/// Single-line buffer with a UTF-8 byte cursor kept on an extended grapheme boundary.
 #[derive(Default)]
 struct Editor<'a> {
+    /// Editable single-line prompt buffer.
     text: String,
+    /// Byte offset at a grapheme boundary within the buffer.
     cursor: usize,
+    /// Index within the current prefix's sorted completion matches.
     selected: usize,
+    /// Borrowed parser entries available for prefix matching.
     candidates: Vec<&'a suggestion::Candidate>,
 }
 
 impl<'a> Editor<'a> {
+    /// Submit the entire buffer and reset the cursor and completion selection.
     fn take(&mut self) -> String {
         self.cursor = 0;
         self.selected = 0;
         mem::take(&mut self.text)
     }
 
+    /// Insert at the cursor, then account for graphemes that merged across the insertion
+    /// boundary.
     fn insert(&mut self, text: &str) {
         self.text.insert_str(self.cursor, text);
         self.cursor = self.boundary_at_or_after(self.cursor + text.len());
     }
 
+    /// Find the next valid grapheme boundary or the end of the string.
     fn boundary_at_or_after(&self, offset: usize) -> usize {
         self.text
             .grapheme_indices(true)
@@ -677,10 +742,13 @@ impl<'a> Editor<'a> {
             .unwrap_or(self.text.len())
     }
 
+    /// Look up completions for the token intersecting the current cursor position.
     fn suggestions(&self) -> Option<suggestion::Suggestions<'a>> {
         suggestion::matches(&self.candidates, &self.text, self.cursor)
     }
 
+    /// Move or delete by grapheme cluster and accept completion by whole token. Ordinary
+    /// edits reset the selected candidate.
     fn edit(&mut self, code: KeyCode) {
         match code {
             KeyCode::Up | KeyCode::Down => {
@@ -730,6 +798,8 @@ impl<'a> Editor<'a> {
         self.selected = 0;
     }
 
+    /// Walk backwards from the cursor in terminal columns to select a visible substring and
+    /// position the hardware cursor.
     fn render(&self, frame: &mut Frame<'_>, area: Rect) {
         if area.is_empty() {
             return;

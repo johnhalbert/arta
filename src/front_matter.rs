@@ -1,6 +1,10 @@
+//! Shared boundary between Markdown and YAML in agent profiles and skill packages.
+
 use anyhow::{Context, Result, bail};
 use serde::de::DeserializeOwned;
 
+/// Accept an optional byte-order mark and LF or CRLF fences. Deserialize only the header and
+/// borrow the exact bytes following the closing fence as the body.
 pub(crate) fn parse<T: DeserializeOwned>(source: &str) -> Result<(T, &str)> {
     let source = source.strip_prefix('\u{feff}').unwrap_or(source);
     let source = source

@@ -1,3 +1,7 @@
+//! Named agent bindings and the framed request/reply API. A session can multiplex several
+//! agents by name. Each invocation of the stream API addresses one agent and processes its
+//! messages in order.
+
 use crate::{
     agent::{Agent, AgentOptions},
     model::ModelId,
@@ -9,10 +13,13 @@ use std::collections::{HashMap, hash_map::Entry};
 
 /// A group of one or more agents owned by the harness.
 pub struct Session {
+    /// Bindings indexed by unique session-local names.
     agents: HashMap<String, Agent>,
 }
 
 impl Session {
+    /// Bind all agents into a temporary map. Reject empty sessions and blank or duplicate
+    /// agent IDs before the session can be published by the harness.
     pub(crate) fn new<'a>(
         bindings: impl IntoIterator<Item = (&'a str, ModelId<'a>, AgentOptions<'a>)>,
         bind: impl Fn(ModelId<'a>, AgentOptions<'a>) -> Result<Agent>,
@@ -36,12 +43,14 @@ impl Session {
         Ok(Self { agents })
     }
 
+    /// Borrow an agent by its session-local name.
     pub fn agent(&self, agent_id: &str) -> Result<&Agent> {
         self.agents
             .get(agent_id)
             .with_context(|| format!("unknown agent '{agent_id}'"))
     }
 
+    /// Resolve a session-local name for an exclusive binding update.
     pub(crate) fn agent_mut(&mut self, agent_id: &str) -> Result<&mut Agent> {
         self.agents
             .get_mut(agent_id)
@@ -63,6 +72,8 @@ impl Session {
     }
 }
 
+/// Accumulate chunks between Begin and End. EOF between messages is clean. A misplaced frame
+/// or EOF inside a message fails before inference starts.
 async fn read_prompt(input: &mut Stream<'_>) -> Result<Option<String>> {
     match input.next().await.transpose()? {
         None => return Ok(None),

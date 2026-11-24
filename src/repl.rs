@@ -1,3 +1,7 @@
+//! Conversation controller shared by the fullscreen and line-based interfaces. It owns
+//! successful chat history, persistent mentions, and the workflow selected for the next
+//! prompt.
+
 pub(super) mod command;
 pub(super) mod mcp;
 pub(super) mod parser;
@@ -21,27 +25,45 @@ use parser::Parser;
 use std::io::IsTerminal;
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+/// Effects collected while parsing one line. Reset and mention handlers mutate the REPL
+/// during parsing. Each frontend then handles exit, model requests, workflow selection, and
+/// any remaining prompt.
 #[derive(Default)]
 pub(super) struct Submission {
+    /// Nonblank residual text, absent for command-only submissions and exit.
     pub(super) prompt: Option<String>,
+    /// Leave the interface before processing deferred requests or sending residual text.
     pub(super) exit: bool,
+    /// Signals that reset already cleared conversation state and the TUI should clear its
+    /// projections.
     pub(super) history_cleared: bool,
+    /// Queries and switch requests in input order. A missing ID requests the current model.
     pub(super) model_requests: Vec<Option<String>>,
+    /// Outer option distinguishes an absent command from a command with a missing argument.
     pub(super) workflow_request: Option<Option<String>>,
 }
 
 /// Owns the conversation shared by the terminal and line-based interfaces.
 pub(super) struct Repl<'a> {
+    /// Owns the CLI session and lends providers and tools to workflow runs.
     harness: &'a mut Harness,
+    /// Agent bound inside the session named `cli`.
     agent_name: &'a str,
+    /// Shared rule registry used for both submissions and completions.
     parser: &'a Parser,
+    /// Completed ordinary chat turns supplied to the model in chronological order.
     history: Vec<Turn>,
+    /// Catalog and active skill mentions for constructing per-turn instructions.
     skills: skill::Skills,
+    /// Visible MCP handles, including profile defaults and later explicit mentions.
     mcp_tools: mcp::ToolSelection,
+    /// Pending definition consumed by the next prompt.
     workflow: Option<Workflow>,
 }
 
 impl<'a> Repl<'a> {
+    /// Start a conversation with empty history and the tools made visible by the agent
+    /// profile.
     pub(super) fn new(
         harness: &'a mut Harness,
         agent_name: &'a str,
@@ -60,14 +82,19 @@ impl<'a> Repl<'a> {
         }
     }
 
+    /// Apply registered rules and return deferred actions and residual prompt text.
     pub(super) fn submit(&mut self, input: String) -> Submission {
         self.parser.parse(self, input)
     }
 
+    /// Borrow the rule registry so the editor can derive suggestions from the same names it
+    /// parses.
     pub(super) fn parser(&self) -> &'a Parser {
         self.parser
     }
 
+    /// Execute queued queries and switches in order and return the last status. The selected
+    /// agent keeps its history and settings.
     pub(super) async fn apply_model_requests(
         &mut self,
         requests: Vec<Option<String>>,
@@ -89,6 +116,8 @@ impl<'a> Repl<'a> {
         Ok(status)
     }
 
+    /// Load a workflow into the pending slot, suppressing llama.cpp verbosity for fullscreen
+    /// nodes. An invalid new selection leaves the prior slot intact.
     pub(super) fn select_workflow(
         &mut self,
         config: &Config,
@@ -110,10 +139,14 @@ impl<'a> Repl<'a> {
         Ok(self.workflow.insert(workflow))
     }
 
+    /// Consume the pending selection when a prompt arrives, so later submissions return to
+    /// ordinary chat.
     pub(super) fn take_workflow(&mut self) -> Option<Workflow> {
         self.workflow.take()
     }
 
+    /// On first poll, unload the conversation model, then drive a separate workflow run.
+    /// Return ordinary history alongside the stream for display.
     pub(super) fn workflow_events<'b>(
         &'b mut self,
         workflow: &'b Workflow,
@@ -135,10 +168,13 @@ impl<'a> Repl<'a> {
         (&self.history, events)
     }
 
+    /// Borrow completed ordinary chat turns in submission order.
     pub(super) fn history(&self) -> &[Turn] {
         &self.history
     }
 
+    /// Build this turn's instructions and tool set from active mentions and the remaining
+    /// skill catalog. Defer inference until a frontend polls the stream.
     pub(super) fn reply<'b>(
         &'b self,
         prompt: &'b str,
@@ -168,10 +204,14 @@ impl<'a> Repl<'a> {
         )
     }
 
+    /// Commit a successfully consumed reply to the next chat turn's context.
     pub(super) fn complete(&mut self, turn: Turn) {
         self.history.push(turn);
     }
 
+    /// Read one UTF-8 line at a time, handle deferred commands, then drain either workflow
+    /// events or a chat reply. Report recoverable turn errors and continue when stdin is
+    /// interactive. With redirected input, propagate the first such error.
     pub(super) async fn run_lines(&mut self, config: &Config) -> Result<()> {
         let interactive = std::io::stdin().is_terminal();
         let mut input = BufReader::new(io::stdin()).lines();

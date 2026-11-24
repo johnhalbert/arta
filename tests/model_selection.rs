@@ -1,3 +1,7 @@
+//! Harness and streaming contracts exercised with deterministic providers. The streaming
+//! fixture records when input and output are polled, exposing framing, ordering,
+//! cancellation, and independence between pending streams.
+
 use anyhow::{Context, Result};
 use arta::{
     config::Config,
@@ -208,12 +212,15 @@ fn harness_rejects_duplicate_registration_before_creating_a_provider() -> Result
     Ok(())
 }
 
+/// Records prompts and polling activity so a test can distinguish buffered input from
+/// demand-driven output.
 #[derive(Default)]
 struct Activity {
     prompts: Mutex<Vec<String>>,
     chunks: AtomicUsize,
 }
 
+/// Returns observable chunks for testing stream boundaries without loading a GGUF model.
 struct StreamingProvider {
     model: Arc<TestModel>,
     activity: Arc<Activity>,

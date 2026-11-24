@@ -1,3 +1,6 @@
+//! Terminal Markdown rendering shared by the fullscreen transcript and terminal stdout. Reply
+//! text stored in history and text written to pipes retain their original Markdown.
+
 use crossterm::terminal;
 use ratatui::{backend::IntoCrossterm, text::Line};
 use std::{
@@ -7,6 +10,7 @@ use std::{
 };
 use tui_markdown::{Options, StyleSheet, from_str_with_options};
 
+/// Hide literal heading markers when drawing styled headings.
 #[derive(Clone)]
 struct ReplyStyles;
 
@@ -16,6 +20,8 @@ impl StyleSheet for ReplyStyles {
     }
 }
 
+/// Render Markdown to styled spans at the given table width, then clean each rendered span,
+/// including decoded entities.
 pub(super) fn render(source: &str, width: u16) -> Vec<Line<'_>> {
     let options = Options::new(ReplyStyles).table_width(width);
     let mut text = from_str_with_options(source, &options);
@@ -28,6 +34,8 @@ pub(super) fn render(source: &str, width: u16) -> Vec<Line<'_>> {
     text.lines
 }
 
+/// Expand tabs to four spaces and drop other control characters. Borrow the original text
+/// when no cleanup is needed.
 pub(super) fn clean_terminal_text(text: &str) -> Cow<'_, str> {
     if !text.chars().any(char::is_control) {
         return Cow::Borrowed(text);
@@ -43,13 +51,17 @@ pub(super) fn clean_terminal_text(text: &str) -> Cow<'_, str> {
     Cow::Owned(clean)
 }
 
+/// Terminal width and ANSI capability used when formatting a complete stdout reply.
 #[derive(Clone, Copy)]
 pub(super) struct TerminalOutput {
+    /// Available terminal columns used when laying out Markdown tables.
     pub(super) width: u16,
+    /// Whether formatted spans may include generated ANSI styling.
     pub(super) ansi: bool,
 }
 
 impl TerminalOutput {
+    /// Enable formatting only for terminal stdout, using 80 columns if size detection fails.
     pub(super) fn detect() -> Option<Self> {
         io::stdout().is_terminal().then(|| {
             #[cfg(windows)]
@@ -64,6 +76,8 @@ impl TerminalOutput {
         })
     }
 
+    /// Render a complete reply with optional ANSI styling and newline-terminate each rendered
+    /// line.
     pub(super) fn format(self, source: &str) -> String {
         let mut output = String::new();
         if source.is_empty() {

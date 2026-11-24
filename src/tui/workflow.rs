@@ -1,3 +1,6 @@
+//! Two projections of one workflow. The outline flattens the static tree for navigation. The
+//! transcript appends every actual visit, including repeated visits to the same node.
+
 use crate::markdown::{clean_terminal_text, render};
 use arta::workflow::{LoopIteration, Workflow, node::Node};
 use ratatui::{
@@ -8,28 +11,44 @@ use ratatui::{
     widgets::{Block, BorderType, Paragraph, Wrap},
 };
 
+/// Scrollable definition tree annotated with the current visit, loop stack, model, and run
+/// status.
 pub(super) struct WorkflowPane {
+    /// YAML workflow label used in the pane title.
     id: String,
+    /// Preorder outline containing one row per declared node.
     rows: Vec<Row>,
+    /// Ready before submission, then running, complete, or failed.
     status: &'static str,
+    /// Index of the active agent row, retained when a visit fails.
     current: Option<usize>,
+    /// Iteration path used to annotate active ancestor rows.
     loops: Vec<LoopIteration>,
+    /// Display label built from model-loading and model-loaded events.
     pub(super) model: Option<String>,
+    /// Index of the first visible outline row.
     scroll: usize,
+    /// Number of outline rows available after reserving space for the model label.
     page: usize,
 }
 
+/// One flattened tree entry retaining indentation and an optional agent profile.
 struct Row {
+    /// Definition ID used to locate the row on a node-start event.
     id: String,
+    /// Tree depth, rendered as two spaces per enclosing loop.
     indent: usize,
+    /// Profile name for a leaf. Absence identifies a loop heading.
     agent: Option<String>,
 }
 
 impl WorkflowPane {
+    /// Build an outline from the validated tree before the first agent visit.
     pub(super) fn new(workflow: &Workflow) -> Self {
         Self::from_nodes(workflow.id(), workflow.nodes())
     }
 
+    /// Flatten the definition in preorder and initialize a ready, unselected outline.
     pub(super) fn from_nodes(id: &str, nodes: &[Node]) -> Self {
         let mut rows = Vec::new();
         Self::append_nodes(&mut rows, nodes, 0);
@@ -45,6 +64,8 @@ impl WorkflowPane {
         }
     }
 
+    /// Add each loop before its more deeply indented children and retain agent names on
+    /// leaves.
     fn append_nodes(rows: &mut Vec<Row>, nodes: &[Node], indent: usize) {
         for node in nodes {
             match node {
@@ -65,16 +86,19 @@ impl WorkflowPane {
         }
     }
 
+    /// Change the outline's status from ready to running.
     pub(super) fn start(&mut self) {
         self.status = "Running";
     }
 
+    /// Select the row for a node start and reveal it within the current page.
     pub(super) fn node(&mut self, id: &str, loops: Vec<LoopIteration>) {
         self.current = self.rows.iter().position(|row| row.id == id);
         self.loops = loops;
         self.reveal_current();
     }
 
+    /// Move the viewport the minimum distance needed to include the active row.
     fn reveal_current(&mut self) {
         if let Some(current) = self.current {
             self.scroll = self
@@ -83,6 +107,7 @@ impl WorkflowPane {
         }
     }
 
+    /// Clear the active path on success and preserve it on failure for inspection.
     pub(super) fn finish(&mut self, success: bool) {
         self.status = if success { "Complete" } else { "Failed" };
         if success {
@@ -91,6 +116,7 @@ impl WorkflowPane {
         }
     }
 
+    /// Move by one viewport of definition rows. Rendering clamps the last page.
     pub(super) fn page(&mut self, down: bool) {
         self.scroll = if down {
             self.scroll.saturating_add(self.page)
@@ -99,6 +125,8 @@ impl WorkflowPane {
         };
     }
 
+    /// Reserve space for the model label, clamp the visible rows, and annotate active loop
+    /// iterations.
     pub(super) fn render(&mut self, frame: &mut Frame<'_>, area: Rect) {
         let title = format!(" {} · {} ", clean_terminal_text(&self.id), self.status);
         let mut block = Block::bordered()
@@ -170,21 +198,34 @@ impl WorkflowPane {
     }
 }
 
+/// Display record anchored at the number of ordinary chat turns present when the workflow
+/// began.
 pub(super) struct WorkflowTranscript {
+    /// Number of completed ordinary chat turns when this workflow started. Anchors it in the
+    /// display timeline.
     pub(super) history_index: usize,
+    /// Original workflow request displayed once above its visits.
     prompt: String,
+    /// Chronological visits including repeated entries for loop iterations.
     steps: Vec<Step>,
+    /// Terminal execution error shown after any partial output.
     pub(super) error: Option<String>,
+    /// Draw the activity indicator while awaiting the current visit's first nonempty output.
     pub(super) waiting: bool,
 }
 
+/// One chronological visit, retaining its label, control calls, and accumulated reply.
 struct Step {
+    /// Node, agent and loop path formatted when the visit starts.
     label: String,
+    /// Rendered loop-control attempts belonging to this visit.
     tool_calls: Vec<String>,
+    /// Concatenated output chunks, retained for Markdown rendering on redraw.
     reply: String,
 }
 
 impl WorkflowTranscript {
+    /// Anchor an empty workflow transcript at the current position in the conversation.
     pub(super) fn new(history_index: usize, prompt: String) -> Self {
         Self {
             history_index,
@@ -195,6 +236,7 @@ impl WorkflowTranscript {
         }
     }
 
+    /// Start a new transcript entry even when the same node ID has run before.
     pub(super) fn node(&mut self, label: String) {
         self.steps.push(Step {
             label,
@@ -204,12 +246,15 @@ impl WorkflowTranscript {
         self.waiting = true;
     }
 
+    /// Attach a control call label to the current visit.
     pub(super) fn tool_call(&mut self, label: String) {
         if let Some(step) = self.steps.last_mut() {
             step.tool_calls.push(label);
         }
     }
 
+    /// Append a model chunk to the current visit and end its waiting animation on nonempty
+    /// text.
     pub(super) fn output(&mut self, chunk: &str) {
         if let Some(step) = self.steps.last_mut() {
             step.reply.push_str(chunk);
@@ -217,6 +262,8 @@ impl WorkflowTranscript {
         self.waiting &= chunk.is_empty();
     }
 
+    /// Render the original request, visits, and any terminal error at the recorded chat
+    /// position.
     pub(super) fn append<'a>(&'a self, lines: &mut Vec<Line<'a>>, width: u16, busy: &str) {
         if !lines.is_empty() {
             lines.push(Line::default());

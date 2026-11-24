@@ -1,3 +1,7 @@
+//! Command-line entry point. Startup selects one framed prompt, a named workflow, or a
+//! conversation. Both terminal interfaces use the library harness on a current-thread Tokio
+//! runtime. Native setup and token generation can use blocking workers.
+
 mod markdown;
 mod repl;
 mod tui;
@@ -21,12 +25,18 @@ use tokio::{
     task::spawn_blocking,
 };
 
+/// Resources shared by CLI turns, including the discovered catalogs used to build mention
+/// rules.
 struct Cli {
+    /// Initialized providers and CLI session bound after discovery.
     harness: Harness,
+    /// Optional activation catalog also used to register skill mentions.
     skills: Option<Arc<ActivateSkill>>,
+    /// Already connected tool handles grouped for per-server visibility in the REPL.
     mcp: McpTools,
 }
 
+/// Send one framed message to the startup agent with the full set of registered tools.
 async fn run_once(startup: &'static StartupConfig, prompt: &str) -> Result<()> {
     let input = prompt_message(prompt).await?;
     let cli = cli_harness(startup, false).await?;
@@ -43,6 +53,8 @@ async fn run_once(startup: &'static StartupConfig, prompt: &str) -> Result<()> {
     .await
 }
 
+/// Wrap a nonblank literal in one chunk, or read a multiline UTF-8 message for the sentinel
+/// `-`.
 async fn prompt_message(prompt: &str) -> Result<Message> {
     if prompt == "-" {
         stdin_message(BufReader::new(io::stdin())).await
@@ -52,6 +64,8 @@ async fn prompt_message(prompt: &str) -> Result<Message> {
     }
 }
 
+/// Collect the request, register skills, and drive the workflow by polling its events. Node
+/// profiles select their own MCP connections.
 async fn run_workflow(
     startup: &'static StartupConfig,
     workflow: &Workflow,
@@ -74,6 +88,8 @@ async fn run_workflow(
     .await
 }
 
+/// Resolve TOML search roots and register one activation tool if discovery finds any skills.
+/// Retain the same catalog for REPL completions.
 fn register_skills(
     harness: &mut Harness,
     config: &config::Config,
@@ -90,6 +106,8 @@ fn register_skills(
     Ok(skills)
 }
 
+/// Load the selected model on a blocking worker before connecting MCP servers. Create the CLI
+/// session last so its agent captures the populated tool registry.
 async fn cli_harness(startup: &'static StartupConfig, fullscreen: bool) -> Result<Cli> {
     let config = &startup.settings;
     let model_id = ModelId {
@@ -138,6 +156,8 @@ async fn cli_harness(startup: &'static StartupConfig, fullscreen: bool) -> Resul
     })
 }
 
+/// Register command and mention rules, then share one conversation controller with the chosen
+/// interface. Fullscreen requires both stdin and stdout to be terminals.
 async fn run_conversation(startup: &'static StartupConfig) -> Result<()> {
     let fullscreen = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
     let mut cli = cli_harness(startup, fullscreen)
@@ -165,6 +185,9 @@ async fn run_conversation(startup: &'static StartupConfig) -> Result<()> {
     }
 }
 
+/// Capture original chunks for history while writing to stdout. Buffer terminal Markdown
+/// until the message ends or fails. Flush redirected chunks immediately and terminate a
+/// successful nonempty reply with a newline when needed.
 async fn write_reply(
     mut replies: Stream<'_>,
     stdout: &mut (impl AsyncWrite + Unpin),
@@ -206,6 +229,8 @@ async fn write_reply(
     Ok(())
 }
 
+/// Read through the first nonblank line before model setup. Preserve leading whitespace and
+/// defer reading the rest of stdin until the message is polled.
 async fn stdin_message(mut input: impl AsyncBufRead + Unpin + Send + 'static) -> Result<Message> {
     // Check for a non-blank prompt before opening the model.
     let mut prefix = String::new();
@@ -232,6 +257,8 @@ async fn stdin_message(mut input: impl AsyncBufRead + Unpin + Send + 'static) ->
     Ok(Message::new(stream::iter([Ok(prefix)]).chain(rest)))
 }
 
+/// Select the execution mode from the presence of a workflow and prompt. Report chained setup
+/// and runtime errors on stderr.
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
     let config = match config::get() {
@@ -250,6 +277,7 @@ async fn main() -> ExitCode {
     }
 }
 
+/// Print the error and its causes and return a failing process exit code.
 fn report_error(error: &anyhow::Error) -> ExitCode {
     eprintln!("error: {error:#}");
     ExitCode::FAILURE

@@ -1,3 +1,7 @@
+//! Composition root for provider instances, session bindings, and shared tools.
+//! [`Harness::create_session`] captures tool handles for a group of agents.
+//! [`Harness::send`] and [`Harness::run_workflow`] also work without a session.
+
 use crate::{
     agent::{Agent, AgentOptions},
     config::Config,
@@ -17,18 +21,29 @@ use std::{
 
 /// Owns the sessions and providers that agents use for inference.
 pub struct Harness {
+    /// Published sessions keyed by caller-provided ID. A failed binding leaves this map
+    /// intact.
     sessions: HashMap<String, Session>,
+    /// Initialized instances shared by their agents and workflow bindings.
     providers: HashMap<String, Arc<dyn Provider>>,
+    /// Current registry for direct sends and future session bindings. Writes use
+    /// copy-on-write.
     tools: Arc<Tools>,
+    /// Keys to omit when constructing a workflow node's workspace-specific tool set.
     mcp_tool_names: HashSet<String>,
+    /// Base settings for named workflows and provider reuse comparisons.
     config: Config,
 }
 
 impl Harness {
+    /// Discover linked provider factories and instantiate each with the supplied
+    /// configuration.
     pub fn new(config: &Config) -> Result<Self> {
         Self::with_registry(config, &ProviderRegistry::discover()?)
     }
 
+    /// Reject unknown provider tables before running factories. Keep a copy of the base
+    /// settings for later workflow loads.
     pub fn with_registry(config: &Config, registry: &ProviderRegistry) -> Result<Self> {
         for id in config.provider_ids() {
             ensure!(registry.contains(id), "unknown configured provider '{id}'");
@@ -67,12 +82,14 @@ impl Harness {
         }
     }
 
+    /// Look up the shared handle retained by agents and workflow model bindings.
     pub(crate) fn provider_handle(&self, provider_id: &str) -> Result<&Arc<dyn Provider>> {
         self.providers
             .get(provider_id)
             .with_context(|| format!("unknown provider '{provider_id}'"))
     }
 
+    /// Borrow a registered provider by its registry ID.
     pub fn provider(&self, provider_id: &str) -> Result<&dyn Provider> {
         Ok(self.provider_handle(provider_id)?.as_ref())
     }
@@ -132,10 +149,13 @@ impl Harness {
         workflow.run(self, prompt).await
     }
 
+    /// Borrow the base settings used when deciding whether a workflow can reuse a provider.
     pub(crate) fn workflow_config(&self) -> &Config {
         &self.config
     }
 
+    /// Take a copy of the registered tools and remove harness-discovered MCP entries. Each
+    /// workflow profile reconnects its selected servers in its own workspace.
     pub(crate) fn workflow_tools(&self) -> Tools {
         let mut tools = (*self.tools).clone();
         for name in &self.mcp_tool_names {
@@ -185,16 +205,19 @@ impl Harness {
         Ok(())
     }
 
+    /// Resolve a session ID or report which ID was missing.
     pub fn session(&self, session_id: &str) -> Result<&Session> {
         self.sessions
             .get(session_id)
             .with_context(|| format!("unknown session '{session_id}'"))
     }
 
+    /// Resolve the session first, then look up the named agent inside it.
     pub fn agent(&self, session_id: &str, agent_id: &str) -> Result<&Agent> {
         self.session(session_id)?.agent(agent_id)
     }
 
+    /// Borrow one agent exclusively, for example to switch its selected model.
     pub fn agent_mut(&mut self, session_id: &str, agent_id: &str) -> Result<&mut Agent> {
         self.sessions
             .get_mut(session_id)
@@ -210,6 +233,8 @@ impl Harness {
         Ok(())
     }
 
+    /// Send a single prompt with the harness's current tools and collect the reply. This path
+    /// requires no session or conversation history.
     pub async fn send(&self, model: ModelId<'_>, prompt: &str) -> Result<String> {
         tool::send(
             self.provider(model.provider)?,

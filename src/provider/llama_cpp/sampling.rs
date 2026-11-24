@@ -1,3 +1,7 @@
+//! Token selection shared by text and tool inference. An absent sampling table chooses a
+//! greedy sampler. A present table configures the native common sampler and seeds its history
+//! with the prompt tokens.
+
 use super::Sampling;
 use anyhow::{Context, Result, ensure};
 use llama_cpp_4::{
@@ -7,48 +11,92 @@ use llama_cpp_4::{
 };
 use serde::{Deserialize, Serialize};
 
+/// Optional native sampler settings. Omitted scalar fields inherit common-sampler defaults.
+/// Grammar selection depends on whether the request exposes tools.
 #[derive(Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SamplingConfig {
+    /// Random number generator seed for reproducible sampling under the same backend
+    /// conditions.
     pub seed: Option<u32>,
+    /// Ordered native stages. Omission preserves the default chain.
     pub samplers: Option<Vec<SamplerStage>>,
+    /// Minimum number of candidates retained by filters that support it.
     pub min_keep: Option<i32>,
+    /// Retain up to this many highest-scoring candidates in the top-k stage.
     pub top_k: Option<i32>,
+    /// Nucleus sampling probability mass cutoff.
     pub top_p: Option<f32>,
+    /// Minimum probability relative to the most probable candidate.
     pub min_p: Option<f32>,
+    /// Chance of applying the exclude-top-choices stage.
     pub xtc_probability: Option<f32>,
+    /// Probability threshold used to identify candidates for exclusion by XTC.
     pub xtc_threshold: Option<f32>,
+    /// Probability mass retained by locally typical sampling.
     pub typ_p: Option<f32>,
+    /// Temperature applied to logits. Zero selects greedy decoding with the default stage
+    /// order.
     pub temp: Option<f32>,
+    /// Range over which the dynamic temperature stage can vary the base temperature.
     pub dynatemp_range: Option<f32>,
+    /// Exponent mapping entropy to a dynamic temperature adjustment.
     pub dynatemp_exponent: Option<f32>,
+    /// Recent token window for repetition, frequency, and presence penalties.
     pub penalty_last_n: Option<i32>,
+    /// Repetition penalty factor. One is neutral.
     pub penalty_repeat: Option<f32>,
+    /// Penalty proportional to token frequency in the penalty window.
     pub penalty_freq: Option<f32>,
+    /// Penalty for a token already present in the window.
     pub penalty_present: Option<f32>,
+    /// Strength of DRY sequence-repetition penalties.
     pub dry_multiplier: Option<f32>,
+    /// Base of the exponential penalty for extending repeated sequences.
     pub dry_base: Option<f32>,
+    /// Length of a repeated sequence allowed before DRY applies a penalty.
     pub dry_allowed_length: Option<i32>,
+    /// Number of recent tokens scanned for repeated sequences.
     pub dry_penalty_last_n: Option<i32>,
+    /// String boundaries that break sequences considered by DRY.
     pub dry_sequence_breakers: Option<Vec<String>>,
+    /// Target token probability for the adaptive-p stage.
     pub adaptive_target: Option<f32>,
+    /// Decay of the moving average used for adaptive sampling.
     pub adaptive_decay: Option<f32>,
+    /// Native Mirostat mode. Zero disables it, one and two select its two algorithms.
     pub mirostat: Option<i32>,
+    /// Standard-deviation threshold used by the top-n-sigma stage.
     pub top_n_sigma: Option<f32>,
+    /// Target entropy for Mirostat.
     pub mirostat_tau: Option<f32>,
+    /// Learning rate for Mirostat adaptation.
     pub mirostat_eta: Option<f32>,
+    /// Disable native sampler performance measurement.
     pub no_perf: Option<bool>,
+    /// Suppress end-of-generation candidates with negative-infinity bias when no grammar
+    /// constrains the step.
     pub ignore_eos: bool,
+    /// User grammar for ordinary text. Mutually exclusive with JSON Schema.
     pub grammar: Option<String>,
+    /// JSON Schema source converted to a grammar for ordinary text generation.
     pub json_schema: Option<String>,
+    /// Apply grammar filtering first when sampling with the common sampler. Defaults to true
+    /// in Arta.
     pub grammar_first: Option<bool>,
+    /// Nonnegative values enable a thinking-token budget and require template reasoning tags.
     pub reasoning_budget_tokens: Option<i32>,
+    /// Text included in the forced end sequence before the first closing reasoning tag.
     pub reasoning_budget_message: Option<String>,
+    /// Per-token score adjustments applied after validating IDs against the loaded
+    /// vocabulary.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub logit_bias: Vec<LogitBias>,
 }
 
 impl SamplingConfig {
+    /// Check probability ranges, finite parameters, repetition penalty bounds, Mirostat
+    /// modes, and grammar exclusivity before constructing the provider.
     pub(super) fn validate(&self) -> Result<()> {
         for (name, value) in [
             ("top_p", self.top_p),
@@ -102,6 +150,9 @@ impl SamplingConfig {
         Ok(())
     }
 
+    /// Overlay supplied parameters on native defaults. Use user grammar or converted schema
+    /// for text and the template's grammar and triggers for tools. Validate
+    /// vocabulary-dependent biases here.
     fn params(&self, model: &LlamaModel, sampling: &Sampling<'_>) -> Result<CommonSamplerParams> {
         let mut params = CommonSamplerParams::new();
         let mut scalars = params.scalars();
@@ -217,6 +268,8 @@ impl SamplingConfig {
         Ok(params)
     }
 
+    /// Tokenize the template's opening and closing reasoning markers without BOS. Configure
+    /// the forced exit from reasoning using the supplied message and first closing marker.
     fn apply_reasoning_budget(
         &self,
         params: &mut CommonSamplerParams,
@@ -244,26 +297,41 @@ impl SamplingConfig {
     }
 }
 
+/// Adjustment to one vocabulary token's score before selection.
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LogitBias {
+    /// Token ID within the loaded model's vocabulary.
     pub token: i32,
+    /// Finite score adjustment or negative infinity to suppress the token.
     pub bias: f32,
 }
 
+/// Selectable stages in the order passed to the native common sampler.
 #[derive(Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SamplerStage {
+    /// Apply repetition, frequency, and presence penalties.
     Penalties,
+    /// Penalize extensions of repeated sequences.
     Dry,
+    /// Filter candidates using the configured score deviation cutoff.
     TopNSigma,
+    /// Keep the highest-scoring candidates by count.
     TopK,
+    /// Filter candidates by typicality.
     TypicalP,
+    /// Filter candidates by cumulative probability.
     TopP,
+    /// Filter by probability relative to the best candidate.
     MinP,
+    /// Probabilistically exclude top choices.
     Xtc,
+    /// Rescale logits by temperature.
     Temperature,
+    /// Apply the native infilling sampler.
     Infill,
+    /// Adapt sampling toward the configured probability target.
     AdaptiveP,
 }
 
@@ -285,12 +353,18 @@ impl From<SamplerStage> for CommonSamplerType {
     }
 }
 
+/// Greedy sampler (optionally chained with tool grammar) or common sampler with its
+/// grammar-first flag.
 pub(super) enum Sampler {
+    /// Highest-score sampler, optionally preceded by a native tool grammar filter.
     Greedy(LlamaSampler),
+    /// Stateful common sampler paired with the grammar-first flag for each sampling call.
     Configured(CommonSampler, bool),
 }
 
 impl Sampler {
+    /// Construct the configured chain and feed it prompt tokens with grammar acceptance
+    /// disabled. In greedy tool mode, prepend the template grammar sampler when present.
     pub(super) fn new(
         model: &LlamaModel,
         config: Option<&SamplingConfig>,
@@ -319,6 +393,8 @@ impl Sampler {
         Ok(Self::Greedy(greedy))
     }
 
+    /// Read the last logits row. The common sampler explicitly accepts the selected token to
+    /// advance its state and grammar.
     pub(super) fn sample(&mut self, context: &mut LlamaContext<'_>) -> Result<LlamaToken> {
         match self {
             Self::Greedy(sampler) => Ok(sampler.try_sample(context, -1)?),

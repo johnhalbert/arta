@@ -1,3 +1,7 @@
+//! Local GGUF provider registered under `llama.cpp`. Provider instances own model caches and
+//! inference settings. Profile-specific instances can share a backend guard. Each inference
+//! step constructs a fresh native context from the rendered prompt.
+
 mod config;
 mod logging;
 mod model;
@@ -30,12 +34,23 @@ use tokio::{
     sync::{mpsc, oneshot},
 };
 
+/// Registers configured model IDs, loads weights on demand, and exposes both streaming text
+/// and buffered tool-aware inference.
 pub struct LlamaCPP {
+    /// All configured identifiers and their load parameters, including currently unloaded
+    /// models.
     models: HashMap<Arc<str>, LlamaCPPModelConfig>,
+    /// Resident weights by ID. Holding the mutex across replacement serializes load and
+    /// eviction.
     loaded: Mutex<HashMap<Arc<str>, Arc<LlamaCPPModel>>>,
+    /// Initialization slot shared with configured provider instances. Empty until a
+    /// configuration needs native models.
     backend: Arc<Mutex<Option<Arc<LlamaBackend>>>>,
+    /// Validated template settings shared with resident models.
     chat: Arc<ChatConfig>,
+    /// Context and sampling policy cloned into blocking workers through an Arc.
     inference: Arc<InferenceConfig>,
+    /// Thread-local log scope value applied during native operations.
     verbose: bool,
 }
 
@@ -44,19 +59,26 @@ inventory::submit! {
 }
 
 impl LlamaCPP {
+    /// Registry and TOML key for this provider.
     pub const ID: &str = "llama.cpp";
 
+    /// Decode the provider table and resolve model, shard, and template paths before
+    /// construction.
     fn from_config(config: &Config) -> Result<Arc<dyn Provider>> {
         let mut settings: LlamaCPPConfig = config.provider_settings(Self::ID)?;
         settings.resolve_paths(config);
         Ok(Arc::new(Self::new(settings)?))
     }
 
-    /// Initialize the backend and register models for on-demand loading.
+    /// Register models for on-demand loading. A nonempty registry initializes the native
+    /// backend before any weights are loaded.
     pub fn new(config: LlamaCPPConfig) -> Result<Self> {
         Self::with_backend(config, Arc::default())
     }
 
+    /// Validate context and sampling settings, load any template override, and populate the
+    /// model registry. Initialize a shared backend only when one is needed and none is
+    /// present.
     fn with_backend(
         mut config: LlamaCPPConfig,
         backend: Arc<Mutex<Option<Arc<LlamaBackend>>>>,
@@ -103,6 +125,8 @@ impl LlamaCPP {
         })
     }
 
+    /// Check that the requested ID exists, then hold the cache lock across any eviction and
+    /// load. Independent inference acquires another strong reference to the loaded weights.
     fn load_model(&self, model_id: &str, previous: Option<&str>) -> Result<Arc<LlamaCPPModel>> {
         let (id, config) = self
             .models
@@ -138,6 +162,8 @@ impl LlamaCPP {
         }
     }
 
+    /// Evict weights only when the cache owns their last strong reference. Metadata handles
+    /// held by idle agents allow eviction.
     fn remove_model(loaded: &mut HashMap<Arc<str>, Arc<LlamaCPPModel>>, id: &str) -> Result<()> {
         if let Some(model) = loaded.get(id) {
             ensure!(
@@ -204,6 +230,9 @@ impl Provider for LlamaCPP {
         self.chat_observed(model_id, system_prompt, history, prompt, None)
     }
 
+    /// Prepare and decode the prompt on a blocking worker. Signal readiness after prefill and
+    /// sampler setup, then feed a single-slot channel. Closing the receiver stops production,
+    /// and joining the worker surfaces late generation errors.
     fn chat_observed<'a>(
         &'a self,
         model_id: &'a str,
@@ -277,21 +306,38 @@ impl Provider for LlamaCPP {
     }
 }
 
+/// Select text versus tool token decoding. Tool inference tracks whether its last emitted
+/// token exhausted the generation budget.
 enum Sampling<'a> {
+    /// Decode ordinary text and make any rendered generation prompt available to the sampler.
     Text(Option<&'a ChatParams>),
+    /// Preserve special token bytes for the structured assistant-message parser.
     Tools {
+        /// Rendered template parameters carrying tool grammar and triggers.
         chat: &'a ChatParams,
+        /// Set on the last budgeted token and cleared when a stop string completes the
+        /// output.
         exhausted: &'a Cell<bool>,
     },
 }
 
+/// Settings shared across workers. The prompt and native inference context are local to each
+/// step.
 struct InferenceConfig {
+    /// Requested capacity before trained-length and native per-sequence limits are applied.
     context_length: Option<u32>,
+    /// Upper bound per generation step, including separate tool follow-ups.
     max_tokens: NonZeroU32,
+    /// Native context settings applied to each fresh decode context.
     context: ContextConfig,
+    /// Optional common-sampler configuration. Absence selects the greedy path.
     sampling: Option<SamplingConfig>,
 }
 
+/// Validate the requested and effective per-sequence capacities. Prefill sequence zero in
+/// batches, then return a lazy iterator. Each iteration decodes the preceding sampled token
+/// before sampling the next. End-of-generation, cancellation, or the smaller of remaining
+/// context and response budget ends iteration.
 fn generate<'a>(
     model: &'a LlamaCPPModel,
     tokens: Vec<LlamaToken>,

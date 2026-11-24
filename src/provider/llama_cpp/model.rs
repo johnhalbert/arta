@@ -1,3 +1,6 @@
+//! Owns loaded decoder weights, the resolved chat template, and a backend guard that outlives
+//! the weights. Public model handles share only the identifier and trained context length.
+
 mod template;
 
 use super::{ChatConfig, LlamaCPPModelConfig};
@@ -14,16 +17,24 @@ use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
 use template::ModelTemplate;
 
+/// Resident resources shared by the cache and active inference workers.
 pub(super) struct LlamaCPPModel {
+    /// Metadata that agents can retain after the cache evicts the native weights.
     pub(super) info: Arc<ModelInfo>,
+    /// Rendering path resolved once from configuration and GGUF metadata.
     template: ModelTemplate,
+    /// Shared rendering options used for both ordinary and tool-aware prompts.
     pub(super) chat: Arc<ChatConfig>,
+    /// Native decoder weights and vocabulary used by every context created for this load.
     pub(super) inner: LlamaModel,
-    // Keep the backend alive until after the native model drops.
+    /// Declared after the weights so the native model drops before its backend guard.
     backend: Arc<LlamaBackend>,
 }
 
 impl LlamaCPPModel {
+    /// Check the base file and every shard, load with model-specific parameters, reject
+    /// unsupported architectures, and select the prompt template before publishing the loaded
+    /// model.
     pub(super) fn load(
         id: Arc<str>,
         backend: Arc<LlamaBackend>,
@@ -65,6 +76,8 @@ impl LlamaCPPModel {
         })
     }
 
+    /// Produce token IDs, stop strings, and optional template parameters from supplied
+    /// conversation state.
     pub(super) fn prepare_prompt(
         &self,
         system_prompt: Option<&str>,
@@ -82,17 +95,21 @@ impl LlamaCPPModel {
         )
     }
 
+    /// Allocate an inference context borrowing this model and its backend guard.
     pub(super) fn new_context(&self, params: LlamaContextParams) -> Result<LlamaContext<'_>> {
         self.inner
             .new_context(&self.backend, params)
             .context("failed to create inference context")
     }
 
+    /// Obtain the resolved template after verifying that it advertises tool-call support.
     pub(super) fn tool_template(&self) -> Result<&ChatTemplates> {
         self.template.tool_template()
     }
 }
 
+/// Check that a configured path resolves to a regular file before passing it to the native
+/// loader.
 fn check_model_file(path: &Path) -> Result<()> {
     let metadata = path
         .metadata()
@@ -105,9 +122,11 @@ fn check_model_file(path: &Path) -> Result<()> {
     Ok(())
 }
 
-// Agent handles retain model metadata without keeping the native weights resident.
+/// Agent-visible identity and capacity that can outlive the native weights.
 pub(super) struct ModelInfo {
+    /// Configuration key used to reacquire the resident model.
     id: Arc<str>,
+    /// Model-reported training length used to compute the default context capacity.
     trained_context_length: u32,
 }
 
@@ -121,6 +140,7 @@ impl Model for ModelInfo {
     }
 }
 
+/// Build role-tagged messages for ordinary chat in chronological order.
 pub(super) fn chat_messages(
     system_prompt: Option<&str>,
     history: &[Turn],
@@ -129,6 +149,8 @@ pub(super) fn chat_messages(
     chat_messages_with(system_prompt, history, prompt, |_, _| {})
 }
 
+/// Insert each previous turn's tool exchanges between its user prompt and assistant reply.
+/// Finish with the new user message.
 pub(super) fn chat_messages_with(
     system_prompt: Option<&str>,
     history: &[Turn],

@@ -1,3 +1,6 @@
+//! Line-oriented projection of workflow events. Replies go to the output writer and progress
+//! goes to a separate writer. Label helpers also supply text for the fullscreen transcript.
+
 use crate::markdown::clean_terminal_text;
 use anyhow::Result;
 use arta::{
@@ -9,6 +12,8 @@ use serde_json::Value;
 use std::fmt::Write;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
+/// Stream every node's reply, separating completed nodes with a newline when needed. On
+/// error, flush partial output before propagating the failure.
 pub(super) async fn write(
     mut events: WorkflowEvents<'_>,
     output: &mut (impl AsyncWrite + Unpin),
@@ -69,6 +74,7 @@ pub(super) async fn write(
     Ok(())
 }
 
+/// Strip control characters, terminate the status line, and flush it immediately.
 async fn write_progress(progress: &mut (impl AsyncWrite + Unpin), message: &str) -> Result<()> {
     progress
         .write_all(format!("{}\n", clean_terminal_text(message)).as_bytes())
@@ -77,6 +83,7 @@ async fn write_progress(progress: &mut (impl AsyncWrite + Unpin), message: &str)
     Ok(())
 }
 
+/// Format the control name, original JSON arguments, loop iteration, and optional rejection.
 pub(super) fn loop_tool_label(
     iteration: &LoopIteration,
     name: &str,
@@ -95,6 +102,8 @@ pub(super) fn loop_tool_label(
     label
 }
 
+/// Disambiguate a node from its profile when their names differ and append all enclosing
+/// iteration numbers.
 pub(super) fn node_label(id: &str, agent: &str, loops: &[LoopIteration]) -> String {
     let mut label = if id == agent {
         id.to_owned()

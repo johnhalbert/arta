@@ -1,3 +1,6 @@
+//! Exercises the library tool loop through a bound agent using an in-process function and a
+//! scripted adapter that inspects its follow-up request.
+
 use anyhow::{Result, bail};
 use arta::{
     agent::AgentOptions,
@@ -15,6 +18,8 @@ use futures_util::future::BoxFuture;
 use serde_json::json;
 use std::sync::Arc;
 
+/// Implements metadata, inference, and tool parsing in one fixture so tests can observe both
+/// sides of a tool exchange.
 struct ToolProvider;
 
 impl Model for ToolProvider {

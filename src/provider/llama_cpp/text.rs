@@ -1,3 +1,6 @@
+//! Converts token byte pieces into streamable text. A token can split a UTF-8 character or a
+//! stop string, so the iterator carries an undecided suffix between pieces.
+
 use anyhow::Result;
 use std::{iter::from_fn, str};
 
@@ -9,6 +12,9 @@ pub(super) fn text_chunks(
     text_chunks_with_stop(pieces, stops, || {})
 }
 
+/// Retain the longest suffix matching the start of a stop string and any incomplete UTF-8
+/// character. Discard bytes from the earliest full stop onward, calling the hook once. At
+/// ordinary EOF flush pending bytes with lossy UTF-8 decoding.
 pub(super) fn text_chunks_with_stop(
     mut pieces: impl Iterator<Item = Result<Vec<u8>>>,
     mut stops: Vec<String>,

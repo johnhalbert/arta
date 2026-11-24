@@ -1,3 +1,7 @@
+//! Selects a configured or embedded template and renders ordinary input. Plain-text models
+//! use a literal first request or a role-labelled transcript. Tool inference requires a
+//! template with tool-call capability.
+
 use super::chat_messages;
 use crate::provider::{PromptObserver, Turn, llama_cpp::ChatConfig};
 use anyhow::{Context, Result, bail, ensure};
@@ -7,12 +11,20 @@ use llama_cpp_4::{
 };
 use serde_json::Value;
 
+/// Rendering mode selected once when the model loads. The template variant can contain either
+/// an explicit override or the model default.
 pub(super) enum ModelTemplate {
+    /// Compiled chat template from the GGUF metadata or an explicit override.
     Embedded(ChatTemplates),
+    /// Build role-labelled text when needed and tokenize literal input without template
+    /// processing.
     PlainText,
 }
 
 impl ModelTemplate {
+    /// Prefer the explicit override. Otherwise use the embedded template when present and
+    /// fall back to plain text for an empty or missing template. Other native errors
+    /// propagate.
     pub(super) fn from_model(model: &LlamaModel, template: Option<&str>) -> Result<Self> {
         if let Some(template) = template {
             return ChatTemplates::from_model(model, Some(template))
@@ -28,6 +40,8 @@ impl ModelTemplate {
         }
     }
 
+    /// Read the template capability JSON and require the tool-call flag before structured
+    /// inference.
     pub(super) fn tool_template(&self) -> Result<&ChatTemplates> {
         let Self::Embedded(templates) = self else {
             bail!("tool use requires a chat template");
@@ -41,6 +55,9 @@ impl ModelTemplate {
         Ok(templates)
     }
 
+    /// Observe the exact rendered string before tokenization. For templated input, combine
+    /// template and configured stops. Plain text uses configured stops and treats
+    /// special-token spellings as literal text.
     pub(super) fn prepare_prompt(
         &self,
         model: &LlamaModel,

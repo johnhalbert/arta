@@ -1,3 +1,7 @@
+//! Configuration shared by the binary and library. The CLI caches its resolved startup plan.
+//! Library callers can load independent TOML files and pass each configuration to its own
+//! harness.
+
 mod agent;
 
 use crate::{
@@ -19,6 +23,8 @@ use std::{
     sync::LazyLock,
 };
 
+/// Cache the resolved startup plan or its first initialization error. A bare invocation uses
+/// the default arguments to enter the conversation interface.
 static CONFIG: LazyLock<Result<StartupConfig>> = LazyLock::new(|| {
     let args = if std::env::args_os().len() == 1 {
         Args::default()
@@ -28,14 +34,21 @@ static CONFIG: LazyLock<Result<StartupConfig>> = LazyLock::new(|| {
     args.into_config()
 });
 
+/// Resolved settings and optional inputs that determine the binary's execution mode.
 pub struct StartupConfig {
+    /// Base configuration for constructing the harness.
     pub settings: Config,
+    /// Literal request or the stdin sentinel `-`. Absence selects a conversation.
     pub prompt: Option<String>,
+    /// Standalone profile supplying the session name, workspace, and system instructions.
     pub agent: Option<AgentProfile>,
+    /// Validated definition with a separate effective configuration for each referenced
+    /// profile.
     pub workflow: Option<Workflow>,
 }
 
 impl StartupConfig {
+    /// Use the selected profile's filename stem, or the session agent name `default`.
     pub fn agent_name(&self) -> &str {
         self.agent.as_ref().map_or("default", AgentProfile::name)
     }
@@ -52,6 +65,7 @@ pub fn get() -> Result<&'static StartupConfig, &'static anyhow::Error> {
     about = "Run a prompt or workflow against a local GGUF model, or start a conversation",
     after_help = "Run arta with no arguments to open the terminal UI using config.toml."
 )]
+/// Command-line inputs before profile merging and path resolution.
 struct Args {
     /// Path to a TOML configuration file (defaults to config.toml when present).
     #[arg(long, value_name = "PATH")]
@@ -108,6 +122,8 @@ struct Args {
 }
 
 impl Args {
+    /// Layer the selected agent onto TOML, then apply CLI overrides. For a workflow, apply
+    /// the CLI settings to each profile after it loads.
     fn into_config(self) -> Result<StartupConfig> {
         let mut settings = Config::load(self.config.as_deref())?;
         let agent = self
@@ -149,13 +165,19 @@ impl Args {
     }
 }
 
+/// Selection and inference overrides applied together after profile loading.
 struct CliOverrides {
+    /// Explicit provider selection applied before model-specific settings.
     provider: Option<String>,
+    /// Provider-local model ID selected for the remaining overrides.
     model: Option<String>,
+    /// CLI inference and file overrides for the resulting selection.
     llama: LlamaCPPOverrides,
 }
 
 impl CliOverrides {
+    /// Select provider and model first so llama.cpp overrides update the intended model
+    /// entry.
     fn apply(&self, settings: &mut Config) -> Result<()> {
         if let Some(provider) = &self.provider {
             settings.app.provider.clone_from(provider);
@@ -167,22 +189,33 @@ impl CliOverrides {
     }
 }
 
+/// TOML root. Provider-specific tables stay untyped until the corresponding factory reads
+/// them.
 #[derive(Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
+    /// Current provider and model IDs used to bind an agent.
     pub app: AppConfig,
+    /// Connections available to startup discovery and workflow profiles.
     pub mcp: McpConfig,
+    /// Directories scanned for skill packages.
     pub skills: SkillConfig,
+    /// Root for named workflow definitions.
     pub workflows: WorkflowConfig,
+    /// Raw TOML keyed by factory ID. Each provider owns the schema of its table.
     providers: BTreeMap<String, toml::Table>,
+    /// Base for relative TOML paths, captured on load and excluded from deserialization.
     #[serde(skip)]
     directory: PathBuf,
 }
 
+/// Default model selection, initially provider `llama.cpp` and model `local`.
 #[derive(Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AppConfig {
+    /// Registry key used to look up the provider.
     pub provider: String,
+    /// Model key interpreted by that provider.
     pub model: String,
 }
 
@@ -217,6 +250,8 @@ impl Config {
         Ok(config)
     }
 
+    /// Deserialize the named table as the caller's type, using its default when the table is
+    /// absent.
     pub fn provider_settings<T: DeserializeOwned + Default>(&self, provider: &str) -> Result<T> {
         self.providers
             .get(provider)
@@ -228,6 +263,7 @@ impl Config {
             .unwrap_or_else(|| Ok(T::default()))
     }
 
+    /// Serialize a complete provider table and replace the previous entry on success.
     pub fn set_provider_settings(
         &mut self,
         provider: &str,
@@ -239,14 +275,18 @@ impl Config {
         Ok(())
     }
 
+    /// Join a path to the loaded TOML file's parent. Absolute paths take precedence. With a
+    /// default configuration the base is empty.
     pub fn resolve_path(&self, path: &Path) -> PathBuf {
         self.directory.join(path)
     }
 
+    /// Iterate configured provider keys so the harness can reject unregistered tables.
     pub(crate) fn provider_ids(&self) -> impl Iterator<Item = &str> {
         self.providers.keys().map(String::as_str)
     }
 
+    /// Borrow the raw table used to compare effective workflow provider settings.
     pub(crate) fn provider_table(&self, id: &str) -> Option<&toml::Table> {
         self.providers.get(id)
     }

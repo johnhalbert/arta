@@ -1,3 +1,7 @@
+//! Configuration and registry contracts. These tests build provider registries and TOML
+//! tables in memory to check discovery, name validation, and the precise scope of CLI
+//! overrides.
+
 use anyhow::Result;
 use arta::{
     config::Config,

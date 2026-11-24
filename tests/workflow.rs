@@ -1,3 +1,7 @@
+//! Workflow execution contracts. Temporary definitions and Markdown profiles exercise the
+//! real loader. Scripted provider responses make history replay, model release, tool calls,
+//! and loop control observable.
+
 use anyhow::Result;
 use arta::{
     config::Config,
@@ -43,6 +47,7 @@ nodes:
     agent: pull-request
 ";
 
+/// Owns the temporary workflow package and its configuration for one test.
 struct Fixture(PathBuf);
 
 impl Fixture {
@@ -84,6 +89,8 @@ impl Drop for Fixture {
     }
 }
 
+/// Shared script queue, resident test model, and chronological resource events across
+/// provider instances.
 #[derive(Default)]
 struct Runtime {
     loaded: Option<Arc<TestModel>>,
@@ -109,6 +116,8 @@ enum Answer {
     Call(&'static str, &'static str),
 }
 
+/// Expected inputs and scripted outcome for one inference step, including prior tool
+/// exchanges.
 struct Step {
     model: &'static str,
     instructions: &'static str,

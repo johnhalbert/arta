@@ -1,12 +1,21 @@
+//! Completion uses the token prefix up to the cursor to select matches, then replaces the
+//! entire token. Offsets are UTF-8 byte positions shared with the editor.
+
 use std::ops::Range;
 
+/// Parser-provided token and its user-facing explanation.
 pub(crate) struct Candidate {
+    /// Complete replacement token including its command or mention prefix.
     pub(crate) name: String,
+    /// Display text accompanying the token in the menu.
     pub(crate) description: String,
 }
 
+/// Sorted matching candidates and the byte range of the complete token under the cursor.
 pub(crate) struct Suggestions<'a> {
+    /// UTF-8 byte span covering the whole token, including text to the right of the cursor.
     token: Range<usize>,
+    /// Matching parser entries sorted by full token name.
     pub(crate) candidates: Vec<&'a Candidate>,
 }
 

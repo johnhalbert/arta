@@ -1,3 +1,6 @@
+//! Agent profiles pair a Markdown system prompt with YAML settings. Standalone agents and
+//! workflow-local agents use the same parser with different lookup directories.
+
 use super::Config;
 use crate::{agent::AgentOptions, front_matter, provider::llama_cpp::LlamaCPPOverrides};
 use anyhow::{Context, Result, ensure};
@@ -9,31 +12,45 @@ use std::{
 
 /// A named agent loaded from a Markdown file.
 pub struct AgentProfile {
+    /// Validated Markdown filename stem, also used as the standalone session's agent ID.
     name: String,
+    /// Resolved existing directory used for local MCP processes.
     workspace: PathBuf,
+    /// Markdown body retained verbatim, including line endings.
     system_prompt: String,
+    /// Names checked against the TOML server map before this profile is used.
     mcp_servers: Vec<String>,
 }
 
+/// Typed profile header. Provider and workspace are required. An omitted model inherits the
+/// current selection.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FrontMatter {
+    /// Required provider ID replacing the incoming app selection.
     provider: String,
+    /// Optional model ID. Omission inherits the incoming app model.
     model: Option<String>,
+    /// Required path interpreted from the profile directory or home.
     workspace: PathBuf,
+    /// Optional server list used for REPL visibility and workflow discovery.
     #[serde(default)]
     mcp_servers: Vec<String>,
+    /// Narrow set of llama.cpp overrides accepted in the YAML header.
     #[serde(default)]
     config: LlamaCPPOverrides,
 }
 
 impl AgentProfile {
+    /// Look up a standalone profile under the current user's `.arta/agents` directory.
     pub(super) fn load(name: &str, settings: &mut Config) -> Result<Self> {
         let home =
             env::home_dir().context("cannot determine the home directory for Arta agents")?;
         Self::load_from(&home.join(".arta").join("agents"), name, settings)
     }
 
+    /// Validate the filename stem before reading it from the supplied directory. Attach the
+    /// source path to parsing errors.
     pub(crate) fn load_from(directory: &Path, name: &str, settings: &mut Config) -> Result<Self> {
         ensure!(
             !name.is_empty()
@@ -51,6 +68,8 @@ impl AgentProfile {
             .with_context(|| format!("invalid agent definition '{}'", file.display()))
     }
 
+    /// Split metadata from instructions, check server names and workspace, then merge model
+    /// settings into the supplied configuration.
     fn parse(
         home: &Path,
         directory: &Path,
@@ -102,6 +121,7 @@ impl AgentProfile {
         })
     }
 
+    /// Return the filename stem used as the profile's agent name.
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -111,6 +131,8 @@ impl AgentProfile {
         &self.mcp_servers
     }
 
+    /// Borrow the resolved workspace and nonblank system prompt for a session or workflow
+    /// agent.
     pub fn options(&self) -> AgentOptions<'_> {
         AgentOptions {
             workspace: Some(&self.workspace),
@@ -119,6 +141,7 @@ impl AgentProfile {
     }
 }
 
+/// Expand a leading home component or resolve the path against the profile directory.
 fn resolve_path(home: &Path, directory: &Path, path: &Path) -> Result<PathBuf> {
     ensure!(!path.as_os_str().is_empty(), "path cannot be empty");
     let resolved = match path.strip_prefix("~") {

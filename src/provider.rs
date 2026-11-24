@@ -1,3 +1,7 @@
+//! Provider contract for model selection, prompt rendering, inference, and optional tool use.
+//! Implementations expose capabilities through trait methods. Callers supply conversation
+//! state on every request.
+
 pub mod llama_cpp;
 pub mod registry;
 pub mod tool;
@@ -10,7 +14,9 @@ use std::sync::Arc;
 /// One completed exchange in a conversation, in user then assistant order.
 #[derive(Clone)]
 pub struct Turn {
+    /// User input as supplied to the completed turn.
     pub prompt: String,
+    /// Assistant text retained for subsequent turns.
     pub reply: String,
 }
 
@@ -37,8 +43,10 @@ pub trait Provider: Send + Sync {
         bail!("this provider does not support agent-specific settings")
     }
 
+    /// Run one prompt without supplied history and return its asynchronous text chunks.
     fn send<'a>(&'a self, model_id: &'a str, prompt: &'a str) -> BoxFuture<'a, Result<Message>>;
 
+    /// Return the adapter for structured tool inference when the implementation supports it.
     fn tool_adapter(&self) -> Option<&dyn tool::ToolAdapter> {
         None
     }

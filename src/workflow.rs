@@ -1,3 +1,7 @@
+//! Loads an ordered tree of agent and loop nodes. Each execution owns its model binding,
+//! per-node conversations, and workspace-specific MCP connections. [`Workflow::events`]
+//! drives the same execution as [`Workflow::run`].
+
 mod agent;
 mod event;
 mod r#loop;
@@ -29,28 +33,40 @@ use std::{
 };
 use tokio::sync::mpsc;
 
+/// Location used to find on-disk workflow packages.
 #[derive(Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct WorkflowConfig {
+    /// Parent of named workflow folders. Relative paths start at the TOML directory.
     pub path: Option<PathBuf>,
 }
 
 /// A workflow definition and the Markdown agent profiles it references.
 pub struct Workflow {
+    /// Display identifier from the YAML definition.
     id: String,
+    /// Validated tree traversed in declaration order.
     nodes: Vec<Node>,
+    /// Resolved profiles keyed by the filename stem referenced by each agent leaf.
     agents: BTreeMap<String, Profile>,
 }
 
+/// YAML header and node tree before profile resolution.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Definition {
+    /// Workflow label read independently of the directory name.
     id: String,
+    /// Root sequence checked by the recursive node visitor.
     nodes: Vec<Node>,
 }
 
+/// One referenced Markdown agent and the effective configuration after its overrides.
 struct Profile {
+    /// Instructions, workspace and named MCP servers shared by nodes referencing this
+    /// profile.
     agent: AgentProfile,
+    /// Effective config after loading this profile and applying invocation overrides.
     settings: Config,
 }
 
@@ -111,10 +127,12 @@ impl Workflow {
         })
     }
 
+    /// Return the ID declared in YAML. Directory lookup uses the name passed to load.
     pub fn id(&self) -> &str {
         &self.id
     }
 
+    /// Borrow the validated tree in execution order, for example to draw an outline.
     pub fn nodes(&self) -> &[Node] {
         &self.nodes
     }
@@ -146,6 +164,9 @@ impl Workflow {
         stream::select(events, execution).boxed()
     }
 
+    /// Check the request and provider IDs, create fresh run state, and execute the root
+    /// sequence. Attempt final model release on success or failure, preserving the execution
+    /// error if both fail.
     async fn run_with_progress(
         &self,
         harness: &Harness,
@@ -181,19 +202,32 @@ impl Workflow {
     }
 }
 
+/// State for one invocation. Node IDs key histories, profile names key settings, and
+/// workspace/server pairs key connections.
 struct Run<'a> {
+    /// Source of registered providers and workflow-visible in-process tools.
     harness: &'a Harness,
+    /// Validated name-to-profile map borrowed from the definition.
     profiles: &'a BTreeMap<String, Profile>,
+    /// Conversation state per node ID, created on first visit.
     agents: HashMap<&'a str, WorkflowAgent>,
+    /// Discovered MCP handles reused for the same workspace and server name during this run.
     connections: HashMap<(PathBuf, String), Vec<Arc<dyn Tool>>>,
+    /// Binding currently owned by the executor. The final binding is released during cleanup.
     model: Option<ActiveModel>,
+    /// Unmodified request included in every node's prompt.
     request: &'a str,
+    /// Immediate predecessor's reply across all nodes and loop boundaries.
     previous: Option<String>,
+    /// Optional event sink shared with node agents and model selection.
     progress: &'a Progress,
+    /// Active iteration stack copied into node-start events.
     loops: Vec<LoopIteration>,
 }
 
 impl<'a> Run<'a> {
+    /// Await siblings in definition order. Boxing breaks the recursive future type for nested
+    /// loops.
     fn sequence<'b>(&'b mut self, nodes: &'a [Node]) -> BoxFuture<'b, Result<()>> {
         Box::pin(async move {
             for node in nodes {
@@ -203,6 +237,7 @@ impl<'a> Run<'a> {
         })
     }
 
+    /// Dispatch an agent leaf or enter the loop interpreter for a subtree.
     async fn node(&mut self, node: &'a Node) -> Result<()> {
         match node {
             Node::Agent { id, agent } => {
@@ -213,6 +248,7 @@ impl<'a> Run<'a> {
         Ok(())
     }
 
+    /// Attach the node ID and profile name to failures from a visit.
     async fn agent(
         &mut self,
         id: &'a str,
@@ -224,6 +260,9 @@ impl<'a> Run<'a> {
             .with_context(|| format!("node '{id}' (agent '{name}') failed"))
     }
 
+    /// Announce the node, resolve tools and model, and pass the original request plus any
+    /// nonempty predecessor reply to the agent. Save the reply for the next handoff after
+    /// success.
     async fn agent_turn(
         &mut self,
         id: &'a str,
@@ -271,6 +310,9 @@ impl<'a> Run<'a> {
         Ok(decision)
     }
 
+    /// Start with harness tools excluding harness-discovered MCP entries. Add only the
+    /// profile's named servers, reusing connections for the same workspace and server within
+    /// the run.
     async fn tools(&mut self, profile: &Profile) -> Result<Tools> {
         let mut tools = self.harness.workflow_tools();
         let directory = profile.settings.resolve_path(Path::new("."));

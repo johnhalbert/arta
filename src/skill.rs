@@ -1,3 +1,6 @@
+//! Discovers Markdown packages and exposes their catalog through one activation tool. A
+//! caller can also read a skill body directly and remove it from the remaining catalog.
+
 use crate::{
     front_matter,
     tool::{Tool, ToolArguments, ToolOutput, ToolSpec},
@@ -15,26 +18,36 @@ use std::{
     sync::Arc,
 };
 
+/// Search roots for immediate child directories containing `SKILL.md`.
 #[derive(Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SkillConfig {
+    /// Directories resolved relative to the TOML configuration before discovery.
     pub directories: Vec<PathBuf>,
 }
 
+/// Required metadata advertised to the model and used for completion.
 #[derive(Deserialize)]
 struct FrontMatter {
+    /// Validated slug shared by the activation tool and REPL mention.
     name: String,
+    /// Short description advertised without loading the skill body into a prompt.
     description: String,
 }
 
 /// Advertises available skills and returns their Markdown instructions on demand.
 pub struct ActivateSkill {
+    /// Function description and argument schema derived from this catalog's remaining names.
     spec: ToolSpec,
+    /// Sorted name-to-body index. Filtered catalogs share their skill allocations.
     skills: BTreeMap<String, Arc<Skill>>,
 }
 
+/// Loaded description and verbatim body shared across filtered catalogs.
 struct Skill {
+    /// Catalog summary used in tool descriptions and REPL suggestions.
     description: String,
+    /// Markdown following the closing YAML fence, returned verbatim on activation.
     instructions: String,
 }
 
@@ -76,12 +89,14 @@ impl ActivateSkill {
         Self::with_skills(skills)
     }
 
+    /// Iterate names and trimmed descriptions in name order.
     pub fn catalog(&self) -> impl Iterator<Item = (&str, &str)> {
         self.skills
             .iter()
             .map(|(name, skill)| (name.as_str(), skill.description.trim()))
     }
 
+    /// Borrow the Markdown body for a catalog name.
     pub fn instructions(&self, name: &str) -> Option<&str> {
         self.skills
             .get(name)
@@ -99,6 +114,8 @@ impl ActivateSkill {
         )
     }
 
+    /// Build a function schema whose name argument enumerates the remaining skills. An empty
+    /// catalog yields no tool.
     fn with_skills(skills: BTreeMap<String, Arc<Skill>>) -> Result<Option<Self>> {
         if skills.is_empty() {
             return Ok(None);
@@ -144,6 +161,8 @@ impl Tool for ActivateSkill {
     }
 }
 
+/// Enforce a lowercase ASCII slug of at most 64 bytes with single interior hyphens and a
+/// nonblank description.
 fn parse(source: &str) -> Result<(FrontMatter, &str)> {
     let (metadata, body): (FrontMatter, _) = front_matter::parse(source)?;
     let name = &metadata.name;

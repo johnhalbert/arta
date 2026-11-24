@@ -1,3 +1,7 @@
+//! Per-node memory and execution. Each visit creates a short-lived agent bound to the
+//! selected model. The node retains successful turns and tool exchanges across model switches
+//! and loop iterations.
+
 use super::{
     LoopIteration, WorkflowEvent,
     event::Progress,
@@ -18,11 +22,17 @@ use std::sync::Arc;
 /// A workflow node's conversation, independent of the model currently loaded.
 #[derive(Default)]
 pub(super) struct WorkflowAgent {
+    /// Completed visits to this node in order, each with the actual handoff prompt and final
+    /// reply.
     history: Vec<Turn>,
+    /// One entry per history index, containing the tool batches replayed inside that turn.
     exchanges: Vec<Vec<ToolExchange>>,
 }
 
 impl WorkflowAgent {
+    /// Install decision tools for a deciding visit. Replay this node's history, stream output
+    /// events, then append the turn and its exchanges together after validating any required
+    /// decision.
     pub(super) async fn run(
         &mut self,
         model: &ActiveModel,

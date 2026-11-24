@@ -1,3 +1,7 @@
+//! Two-pass submission parser. It identifies complete whitespace-delimited tokens and their
+//! optional arguments, removes those spans, then invokes matching handlers in input order
+//! with the residual text.
+
 use super::suggestion::Candidate;
 use super::{Repl, Submission};
 use arta::tool::Tool;
@@ -8,15 +12,22 @@ use std::sync::Arc;
 type Handler =
     dyn Fn(&mut RuleContext<'_, '_>, Option<&str>, String) -> Option<String> + Send + Sync;
 
+/// A delimiter, matcher, and action, optionally exposed to the editor as a named completion.
 pub(super) struct Rule {
+    /// First character checked before running the matcher.
     delimiter: char,
+    /// Predicate on the complete input token including its delimiter.
     matcher: Box<dyn Fn(&str) -> bool + Send + Sync>,
+    /// Enable consumption of a following quoted value or non-rule token.
     takes_argument: bool,
+    /// Action applied to residual text after all token spans are identified.
     handler: Box<Handler>,
+    /// Optional candidate exposed to the fullscreen editor.
     suggestion: Option<Candidate>,
 }
 
 impl Rule {
+    /// Build a custom matching rule with no argument or completion entry.
     pub(super) fn new(
         delimiter: char,
         matcher: impl Fn(&str) -> bool + Send + Sync + 'static,
@@ -34,6 +45,7 @@ impl Rule {
         }
     }
 
+    /// Create an exact-token rule with a matching editor candidate.
     pub(super) fn named(
         delimiter: char,
         name: String,
@@ -50,14 +62,18 @@ impl Rule {
         }
     }
 
+    /// Consume a following quoted value or a single unquoted token that is not itself a
+    /// registered rule.
     pub(super) fn with_argument(mut self) -> Self {
         self.takes_argument = true;
         self
     }
 }
 
+/// Ordered rules shared by submission parsing and suggestion discovery.
 #[derive(Default)]
 pub(crate) struct Parser {
+    /// Rules in registration order, which also defines precedence for overlapping matchers.
     rules: Vec<Rule>,
 }
 
@@ -67,12 +83,14 @@ impl Parser {
         self.rules.push(rule);
     }
 
+    /// Borrow candidates for rules registered with display names.
     pub(crate) fn suggestions(&self) -> impl Iterator<Item = &Candidate> {
         self.rules
             .iter()
             .filter_map(|rule| rule.suggestion.as_ref())
     }
 
+    /// Find the first rule whose delimiter and predicate match the whole token.
     fn rule_for(&self, token: &str) -> Option<&Rule> {
         self.rules
             .iter()
@@ -140,20 +158,28 @@ impl Parser {
     }
 }
 
+/// State a rule can change during parsing, including deferred requests consumed by the
+/// frontend.
 pub(super) struct RuleContext<'repl, 'agent> {
+    /// Conversation state that reset and mention handlers may update immediately.
     repl: &'repl mut Repl<'agent>,
+    /// Deferred actions and status accumulated for the frontend.
     submission: Submission,
 }
 
 impl RuleContext<'_, '_> {
+    /// Queue a query for a missing ID or a switch for a supplied one.
     pub(super) fn request_model(&mut self, id: Option<&str>) {
         self.submission.model_requests.push(id.map(str::to_owned));
     }
 
+    /// Keep the last workflow request, including a missing argument for a usage error.
     pub(super) fn request_workflow(&mut self, name: Option<&str>) {
         self.submission.workflow_request = Some(name.map(str::to_owned));
     }
 
+    /// Clear completed chat, pending workflow and skill mentions. Retain profile-selected MCP
+    /// tools and signal the UI to clear its display history.
     pub(super) fn clear_history(&mut self) {
         self.repl.history.clear();
         self.repl.workflow = None;
@@ -162,14 +188,17 @@ impl RuleContext<'_, '_> {
         self.submission.history_cleared = true;
     }
 
+    /// Make the named skill's instructions persistent across subsequent chat turns.
     pub(super) fn activate_skill(&mut self, name: &str) {
         self.repl.skills.activate(name);
     }
 
+    /// Expose all selected tools from a mentioned server on subsequent chat turns.
     pub(super) fn expose_mcp_tools(&mut self, tools: &[Arc<dyn Tool>]) {
         self.repl.mcp_tools.expose(tools);
     }
 
+    /// Mark the submission as terminal so any residual text is discarded.
     pub(super) fn exit(&mut self) {
         self.submission.exit = true;
     }

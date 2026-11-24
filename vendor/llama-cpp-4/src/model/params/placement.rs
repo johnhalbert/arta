@@ -1,3 +1,7 @@
+//! Backing storage for explicit model placement. The native parameters borrow device
+//! pointers, relative weights and ordered tensor-buffer overrides through model loading. The
+//! Rust parameter object owns the allocations and the C strings referenced by those arrays.
+
 use super::LlamaModelParams;
 use crate::{llama_backend::LlamaBackend, max_devices, max_tensor_buft_overrides};
 use llama_cpp_sys_4 as sys;
@@ -64,6 +68,8 @@ pub enum ModelPlacementError {
     },
 }
 
+/// Keeps native parameter addresses stable when the enclosing Rust parameter value moves. The
+/// pattern strings outlive all uses of the corresponding buffer override entries.
 #[derive(Default)]
 pub(super) struct PlacementStorage {
     devices: Box<[sys::ggml_backend_dev_t]>,
@@ -254,6 +260,8 @@ impl LlamaModelParams {
     }
 }
 
+/// Index non-null default buffer types from the initialized device registry by their native
+/// names so overrides can resolve a configured name to a pointer.
 fn registered_buffer_types() -> BTreeMap<String, sys::ggml_backend_buffer_type_t> {
     let mut buffer_types = BTreeMap::new();
     // SAFETY: the initialized backend registry owns its devices, default buffer
