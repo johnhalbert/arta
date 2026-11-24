@@ -1,13 +1,11 @@
 mod agent;
 mod event;
+mod r#loop;
 mod model;
 pub mod node;
 
 use self::{
-    agent::WorkflowAgent,
-    event::Progress,
-    model::ActiveModel,
-    node::{LoopDecision, Node},
+    agent::WorkflowAgent, event::Progress, r#loop::LoopDecision, model::ActiveModel, node::Node,
 };
 use crate::{
     config::{AgentProfile, Config},
@@ -15,12 +13,13 @@ use crate::{
     tool::{Tool, Tools},
 };
 use anyhow::{Context, Result, ensure};
-pub use event::{LoopIteration, WorkflowEvent, WorkflowEvents};
+pub use event::{WorkflowEvent, WorkflowEvents};
 use futures_util::{
     StreamExt,
     future::{BoxFuture, ready},
     stream,
 };
+pub use r#loop::LoopIteration;
 use serde::Deserialize;
 use std::{
     collections::{BTreeMap, HashMap, HashSet, btree_map, hash_map},
@@ -209,25 +208,7 @@ impl<'a> Run<'a> {
             Node::Agent { id, agent } => {
                 self.agent(id, agent, false).await?;
             }
-            Node::Loop { id, nodes } => {
-                let (last, preceding) = nodes.split_last().context("loop must contain nodes")?;
-                let (node, agent) = last.final_agent();
-                for number in 1.. {
-                    self.loops.push(LoopIteration {
-                        id: id.clone(),
-                        number,
-                    });
-                    self.sequence(preceding).await?;
-                    if matches!(last, Node::Loop { .. }) {
-                        self.sequence(std::slice::from_ref(last)).await?;
-                    }
-                    let decision = self.agent(node, agent, true).await?;
-                    self.loops.pop();
-                    if decision == Some(LoopDecision::Break) {
-                        break;
-                    }
-                }
-            }
+            Node::Loop { id, nodes } => r#loop::execute(self, id, nodes).await?,
         }
         Ok(())
     }

@@ -1,3 +1,4 @@
+use super::LoopIteration;
 use crate::{provider::PromptObserver, tool::ToolArguments};
 use anyhow::Result;
 use futures_util::stream::BoxStream;
@@ -5,12 +6,6 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 pub type WorkflowEvents<'a> = BoxStream<'a, Result<WorkflowEvent>>;
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LoopIteration {
-    pub id: String,
-    pub number: usize,
-}
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum WorkflowEvent {

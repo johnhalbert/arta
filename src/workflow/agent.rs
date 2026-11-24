@@ -1,5 +1,8 @@
 use super::{
-    LoopIteration, WorkflowEvent, event::Progress, model::ActiveModel, node::LoopDecision,
+    LoopIteration, WorkflowEvent,
+    event::Progress,
+    r#loop::{LoopControl, LoopDecision},
+    model::ActiveModel,
 };
 use crate::{
     agent::Agent,
@@ -8,7 +11,7 @@ use crate::{
     stream::Frame,
     tool::Tools,
 };
-use anyhow::{Context, Result};
+use anyhow::Result;
 use futures_util::StreamExt;
 use std::sync::Arc;
 
@@ -29,13 +32,13 @@ impl WorkflowAgent {
         loop_iteration: Option<&LoopIteration>,
         progress: &Progress,
     ) -> Result<(String, Option<LoopDecision>)> {
-        let decision = loop_iteration
-            .map(|iteration| LoopDecision::register(&mut tools, iteration, progress))
+        let control = loop_iteration
+            .map(|iteration| LoopControl::register(&mut tools, iteration, progress))
             .transpose()?;
-        let loop_id = loop_iteration.map(|iteration| iteration.id.as_str());
-        let instructions = loop_id.map(|id| format!(
-            "You are deciding whether workflow loop '{id}' should repeat. After doing your work for this turn, call `continue` to repeat the loop or `break` to leave it. Use the tool's optional `message` argument to pass your feedback or results to the next node."
-        )).unwrap_or_default();
+        let instructions = control
+            .as_ref()
+            .map(LoopControl::instructions)
+            .unwrap_or_default();
         let agent = Agent::new(
             Arc::clone(&model.provider),
             model.model(),
@@ -59,14 +62,7 @@ impl WorkflowAgent {
                 progress.emit(|| WorkflowEvent::Output(chunk)).await;
             }
         }
-        let decision = loop_id
-            .zip(decision)
-            .map(|(id, decision)| {
-                decision.get().copied().with_context(|| {
-                    format!("loop '{id}' requires the final agent to call 'continue' or 'break'")
-                })
-            })
-            .transpose()?;
+        let decision = control.as_ref().map(LoopControl::decision).transpose()?;
         self.history.push(Turn {
             prompt,
             reply: reply.clone(),
