@@ -67,7 +67,13 @@ async fn cli_harness(startup: &'static StartupConfig, fullscreen: bool) -> Resul
         };
         let mut harness = Harness::new(config)?;
         // Load the startup model before connecting tools.
-        harness.model(model_id)?;
+        harness.model(model_id).with_context(|| {
+            format!(
+                "failed to load model '{}' for agent '{}'",
+                model_id.model,
+                startup.agent_name()
+            )
+        })?;
         let directories = config
             .skills
             .directories

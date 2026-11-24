@@ -81,7 +81,6 @@ Save the following as `~/.arta/agents/reviewer.md`. Create the `review` workspac
 ```markdown
 ---
 provider: llama.cpp
-model: local
 workspace: ~/workspaces/review
 config:
   context_length: 4096
@@ -92,7 +91,7 @@ Review changes for correctness. Cite the file and line for each finding.
 
 Run `arta --agent reviewer` for an interactive conversation or `arta --agent reviewer --prompt "Review this change"` for one reply. The Markdown body supplies the system prompt on every turn, including after `/reset` and during tool calls. If the chat template lacks a system role, llama.cpp folds the instructions into the first user message. For GGUF files without a chat template, Arta adds the instructions to the beginning of the plain-text transcript.
 
-The agent's `provider`, `model`, and optional `config` override the corresponding settings from `config.toml`. For llama.cpp, `config` accepts `model_path`, `context_length`, `max_tokens`, `gpu_layers`, and `verbose`. Set `model_path` to use a GGUF directly. Otherwise, `model` selects a model already registered in TOML. CLI flags take precedence over the agent settings.
+The agent's `provider` and optional `config` override the corresponding settings from `config.toml`. Omit `model` to inherit `[app].model`, or set it to a model ID for the agent's provider. For example, if an agent specifies `model: local` and you rename that model ID in TOML, update or remove the agent's `model` line. For llama.cpp, `config` accepts `model_path`, `context_length`, `max_tokens`, `gpu_layers`, and `verbose`. Set `model_path` to use a GGUF directly. CLI flags take precedence over the agent settings.
 
 Relative `workspace` and `model_path` values start from the Markdown file's directory. Both also accept absolute paths and `~/` paths. The workspace is the working directory of local MCP server processes. Model paths, skill directories, and MCP executable paths set in TOML keep their config-relative resolution.
 

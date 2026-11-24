@@ -18,7 +18,7 @@ pub struct AgentProfile {
 #[serde(deny_unknown_fields)]
 struct FrontMatter {
     provider: String,
-    model: String,
+    model: Option<String>,
     workspace: PathBuf,
     #[serde(default)]
     config: LlamaCPPOverrides,
@@ -55,7 +55,9 @@ impl AgentProfile {
             !metadata.provider.trim().is_empty(),
             "provider cannot be empty"
         );
-        ensure!(!metadata.model.trim().is_empty(), "model cannot be empty");
+        if let Some(model) = &metadata.model {
+            ensure!(!model.trim().is_empty(), "model cannot be empty");
+        }
         ensure!(
             !body.contains('\0'),
             "system prompt contains a NUL character"
@@ -74,7 +76,9 @@ impl AgentProfile {
         }
 
         settings.app.provider = metadata.provider;
-        settings.app.model = metadata.model;
+        if let Some(model) = metadata.model {
+            settings.app.model = model;
+        }
         metadata.config.apply(settings)?;
         Ok(Self {
             name: name.to_owned(),
@@ -108,6 +112,29 @@ fn resolve_path(home: &Path, directory: &Path, path: &Path) -> Result<PathBuf> {
 mod tests {
     use super::*;
     use crate::provider::llama_cpp::{LlamaCPP, LlamaCPPConfig};
+
+    #[test]
+    fn inherits_the_configured_model_when_the_agent_omits_it() -> Result<()> {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut settings: Config = toml::from_str(
+            r#"
+[app]
+model = "qwen3.5"
+
+[[providers."llama.cpp".models]]
+id = "qwen3.5"
+path = "qwen.gguf"
+"#,
+        )?;
+        let source = "---\nprovider: llama.cpp\nworkspace: .\nconfig:\n  gpu_layers: 5\n---\n";
+        AgentProfile::parse(workspace, workspace, "reviewer", source, &mut settings)?;
+
+        assert_eq!(settings.app.model, "qwen3.5");
+        let provider: LlamaCPPConfig = settings.provider_settings(LlamaCPP::ID)?;
+        assert_eq!(provider.models[0].id, "qwen3.5");
+        assert_eq!(provider.models[0].gpu_layers, 5);
+        Ok(())
+    }
 
     #[test]
     fn applies_agent_overrides_and_preserves_the_markdown_body() -> Result<()> {
