@@ -3,7 +3,7 @@
 
 use crate::{
     model::Model,
-    provider::{PromptObserver, Provider, Turn, tool},
+    provider::{PromptObserver, Provider, Turn, TurnObservers, tool},
     stream::Message,
     tool::{Tool, Tools},
 };
@@ -108,7 +108,7 @@ impl Agent {
             prompt,
             self.system_prompt.as_deref(),
             &self.tools,
-            None,
+            TurnObservers::default(),
         )
         .await
     }
@@ -134,6 +134,28 @@ impl Agent {
         tools: impl IntoIterator<Item = Arc<dyn Tool>>,
         observer: Option<PromptObserver>,
     ) -> Result<Message> {
+        self.chat_with_context_and_observers(
+            history,
+            prompt,
+            instructions,
+            tools,
+            TurnObservers {
+                prompt: observer,
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    /// Run a context turn and optionally report rendered inputs and provisional reply text.
+    pub async fn chat_with_context_and_observers(
+        &self,
+        history: &[Turn],
+        prompt: &str,
+        instructions: &str,
+        tools: impl IntoIterator<Item = Arc<dyn Tool>>,
+        observers: TurnObservers,
+    ) -> Result<Message> {
         let system_prompt = self.system_prompt_with(instructions);
         let mut selected = Tools::default();
         for tool in tools {
@@ -144,7 +166,7 @@ impl Agent {
             prompt,
             system_prompt.as_deref(),
             &selected,
-            observer,
+            observers,
         )
         .await
     }
@@ -172,7 +194,10 @@ impl Agent {
             },
             &self.tools,
             past_exchanges,
-            observer,
+            TurnObservers {
+                prompt: observer,
+                ..Default::default()
+            },
         )
         .await
     }
@@ -195,7 +220,7 @@ impl Agent {
         prompt: &str,
         system_prompt: Option<&str>,
         tools: &Tools,
-        observer: Option<PromptObserver>,
+        observers: TurnObservers,
     ) -> Result<Message> {
         tool::chat(
             self.provider(),
@@ -204,7 +229,7 @@ impl Agent {
             history,
             prompt,
             tools,
-            observer,
+            observers,
         )
         .await
     }

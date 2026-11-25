@@ -1,12 +1,12 @@
 //! The llama.cpp implementation of structured inference. It renders schemas and call history
-//! through the chat template, buffers an entire generation on a blocking worker, then parses
-//! it into a reply or callable batch.
+//! through the chat template and parses the completed generation into a reply or callable
+//! batch. Frontends can observe provisional assistant text during generation.
 
 use super::{
     LlamaCPP, Sampling, generate, logging, model::chat_messages_with, text::text_chunks_with_stop,
 };
 use crate::provider::{
-    PromptObserver,
+    PromptObserver, TurnObservers,
     tool::{ToolAdapter, ToolCall, ToolExchange, ToolRequest, ToolResponse},
 };
 use anyhow::{Context, Result, ensure};
@@ -14,7 +14,11 @@ use futures_util::future::BoxFuture;
 use llama_cpp_4::prelude::AddBos;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{cell::Cell, sync::Arc};
+use std::{
+    cell::Cell,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tokio::{runtime::Handle, sync::oneshot};
 
 impl ToolAdapter for LlamaCPP {
@@ -38,6 +42,22 @@ impl ToolAdapter for LlamaCPP {
         request: ToolRequest<'a>,
         past_exchanges: &'a [Vec<ToolExchange>],
         observer: Option<PromptObserver>,
+    ) -> BoxFuture<'a, Result<ToolResponse>> {
+        self.infer_with_observers(
+            request,
+            past_exchanges,
+            TurnObservers {
+                prompt: observer,
+                ..Default::default()
+            },
+        )
+    }
+
+    fn infer_with_observers<'a>(
+        &'a self,
+        request: ToolRequest<'a>,
+        past_exchanges: &'a [Vec<ToolExchange>],
+        observers: TurnObservers,
     ) -> BoxFuture<'a, Result<ToolResponse>> {
         Box::pin(async move {
             ensure!(
@@ -73,7 +93,7 @@ impl ToolAdapter for LlamaCPP {
                         .tool_template()?
                         .apply(&params)
                         .context("failed to format tool prompt")?;
-                    if let Some(observe) = &observer {
+                    if let Some(observe) = &observers.prompt {
                         observe(&chat.prompt);
                     }
                     let add_bos = if model.inner.get_vocab().get_add_bos() {
@@ -98,9 +118,29 @@ impl ToolAdapter for LlamaCPP {
                         },
                         cancelled,
                     )?;
-                    let text: String =
-                        text_chunks_with_stop(pieces, stops, || exhausted.set(false))
-                            .collect::<Result<_>>()?;
+                    let chunks = text_chunks_with_stop(pieces, stops, || exhausted.set(false));
+                    let mut text = String::new();
+                    let mut last_preview = None::<Instant>;
+                    let mut shown = String::new();
+                    for chunk in chunks {
+                        text.push_str(&chunk?);
+                        if let Some(preview) = &observers.reply_preview
+                            && last_preview
+                                .is_none_or(|last| last.elapsed() >= Duration::from_millis(33))
+                        {
+                            last_preview = Some(Instant::now());
+                            if let Ok(parsed) = chat.parse(&text, true)
+                                && let Ok(response) =
+                                    serde_json::from_str::<AssistantResponse>(&parsed)
+                            {
+                                let content = response.content.unwrap_or_default();
+                                if content != shown {
+                                    preview(&content);
+                                    shown = content;
+                                }
+                            }
+                        }
+                    }
                     ensure!(!cancelled(), "llama.cpp inference cancelled");
                     let parsed = chat
                         .parse(&text, false)

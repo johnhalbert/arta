@@ -24,6 +24,18 @@ pub struct Turn {
 /// Receives the provider's rendered text before tokenization, once per inference.
 pub type PromptObserver = Arc<dyn Fn(&str) + Send + Sync>;
 
+/// Receives the current provisional assistant text. Each snapshot replaces the previous one.
+pub type ReplyPreviewObserver = Arc<dyn Fn(&str) + Send + Sync>;
+
+/// Optional notifications for a frontend displaying an ongoing turn.
+#[derive(Clone, Default)]
+pub struct TurnObservers {
+    /// Rendered input for each inference step.
+    pub prompt: Option<PromptObserver>,
+    /// Display-only snapshots from inference steps that buffer their final response.
+    pub reply_preview: Option<ReplyPreviewObserver>,
+}
+
 /// Manages models and runs inference without retaining conversation state.
 pub trait Provider: Send + Sync {
     /// Get a shared reference to a model that this provider can use for inference.

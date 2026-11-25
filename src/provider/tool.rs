@@ -2,7 +2,7 @@
 //! renders and parses one step. This module enforces a per-prompt budget, dispatches calls,
 //! and decides whether another inference step is needed.
 
-use super::{PromptObserver, Provider, Turn};
+use super::{PromptObserver, Provider, Turn, TurnObservers};
 use crate::{
     stream::Message,
     tool::{ToolArguments, ToolOutput, ToolSpec, Tools},
@@ -91,6 +91,16 @@ pub trait ToolAdapter: Send + Sync {
     ) -> BoxFuture<'a, Result<ToolResponse>> {
         self.infer_observed(request, observer)
     }
+
+    /// Run a step and optionally report provisional assistant text to the frontend.
+    fn infer_with_observers<'a>(
+        &'a self,
+        request: ToolRequest<'a>,
+        past_exchanges: &'a [Vec<ToolExchange>],
+        observers: TurnObservers,
+    ) -> BoxFuture<'a, Result<ToolResponse>> {
+        self.infer_recorded(request, past_exchanges, observers.prompt)
+    }
 }
 
 /// Inference state that survives tool exchanges within a turn and is dropped on cancellation.
@@ -115,7 +125,16 @@ pub(crate) async fn send(
     if tools.is_empty() {
         return provider.send(model_id, prompt).await;
     }
-    chat(provider, model_id, None, &[], prompt, tools, None).await
+    chat(
+        provider,
+        model_id,
+        None,
+        &[],
+        prompt,
+        tools,
+        TurnObservers::default(),
+    )
+    .await
 }
 
 /// Run a turn with caller-owned history and discard its intermediate tool exchanges.
@@ -126,7 +145,7 @@ pub(crate) async fn chat(
     history: &[Turn],
     prompt: &str,
     tools: &Tools,
-    observer: Option<PromptObserver>,
+    observers: TurnObservers,
 ) -> Result<Message> {
     let request = ToolRequest {
         model_id,
@@ -136,7 +155,7 @@ pub(crate) async fn chat(
         tools: &[],
         exchanges: &[],
     };
-    Ok(chat_recorded(provider, request, tools, &[], observer)
+    Ok(chat_recorded(provider, request, tools, &[], observers)
         .await?
         .0)
 }
@@ -150,7 +169,7 @@ pub(crate) async fn chat_recorded(
     request: ToolRequest<'_>,
     tools: &Tools,
     past_exchanges: &[Vec<ToolExchange>],
-    observer: Option<PromptObserver>,
+    observers: TurnObservers,
 ) -> Result<(Message, Vec<ToolExchange>)> {
     if tools.is_empty() {
         let reply = provider
@@ -159,7 +178,7 @@ pub(crate) async fn chat_recorded(
                 request.system_prompt,
                 request.history,
                 request.prompt,
-                observer,
+                observers.prompt,
             )
             .await?;
         return Ok((reply, Vec::new()));
@@ -183,12 +202,12 @@ pub(crate) async fn chat_recorded(
         };
         let response = match &mut turn {
             Some(turn) => {
-                turn.infer(request, past_exchanges, observer.clone())
+                turn.infer(request, past_exchanges, observers.prompt.clone())
                     .await?
             }
             None => {
                 adapter
-                    .infer_recorded(request, past_exchanges, observer.clone())
+                    .infer_with_observers(request, past_exchanges, observers.clone())
                     .await?
             }
         };
@@ -202,6 +221,9 @@ pub(crate) async fn chat_recorded(
                 calls,
             } => (content, reasoning, calls),
         };
+        if let Some(preview) = &observers.reply_preview {
+            preview("");
+        }
         ensure!(
             !calls.is_empty(),
             "provider returned an empty tool call list"

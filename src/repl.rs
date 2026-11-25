@@ -14,7 +14,7 @@ use arta::{
     config::Config,
     harness::Harness,
     provider::{
-        PromptObserver, Turn,
+        Turn, TurnObservers,
         llama_cpp::{LlamaCPP, LlamaCPPOverrides},
     },
     stream::{Message, Stream},
@@ -178,7 +178,7 @@ impl<'a> Repl<'a> {
     pub(super) fn reply<'b>(
         &'b self,
         prompt: &'b str,
-        observer: Option<PromptObserver>,
+        observers: Option<TurnObservers>,
     ) -> Stream<'b> {
         Stream::new(
             stream::once(async {
@@ -190,12 +190,12 @@ impl<'a> Repl<'a> {
                     .chain(self.mcp_tools.tools());
                 self.harness
                     .agent("cli", self.agent_name)?
-                    .chat_with_context_observed(
+                    .chat_with_context_and_observers(
                         &self.history,
                         prompt,
                         &instructions,
                         tools,
-                        observer,
+                        observers.unwrap_or_default(),
                     )
                     .await
                     .map(Message::into_stream)

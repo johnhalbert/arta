@@ -8,7 +8,7 @@ use arta::{
     harness::Harness,
     model::{Model, ModelId},
     provider::{
-        PromptObserver, Provider,
+        PromptObserver, Provider, TurnObservers,
         tool::{ToolAdapter, ToolCall, ToolRequest, ToolResponse},
     },
     stream::Message,
@@ -91,6 +91,27 @@ impl ToolAdapter for ToolProvider {
         }
         self.infer(request)
     }
+
+    fn infer_with_observers<'a>(
+        &'a self,
+        request: ToolRequest<'a>,
+        past_exchanges: &'a [Vec<arta::provider::tool::ToolExchange>],
+        observers: TurnObservers,
+    ) -> BoxFuture<'a, Result<ToolResponse>> {
+        Box::pin(async move {
+            if let Some(preview) = observers.reply_preview {
+                let text = if request.exchanges.is_empty() {
+                    "Looking up the color."
+                } else {
+                    "The answer is"
+                };
+                preview(text);
+                tokio::task::yield_now().await;
+            }
+            self.infer_recorded(request, past_exchanges, observers.prompt)
+                .await
+        })
+    }
 }
 
 struct Lookup(ToolSpec);
@@ -147,16 +168,27 @@ async fn an_agent_runs_a_tool_and_returns_the_follow_up_reply() -> Result<()> {
 
     let (sent, mut captured) = tokio::sync::mpsc::unbounded_channel();
     let observe = Arc::new(move |input: &str| sent.send(input.to_owned()).unwrap());
+    let (sent, mut previews) = tokio::sync::mpsc::unbounded_channel();
+    let preview = Arc::new(move |text: &str| sent.send(text.to_owned()).unwrap());
     let reply = harness
         .agent("chat", "agent")?
-        .chat_with_context_observed(
+        .chat_with_context_and_observers(
             &[],
             "favorite color",
             "",
             [lookup as Arc<dyn Tool>],
-            Some(observe),
-        )
-        .await?;
+            TurnObservers {
+                prompt: Some(observe),
+                reply_preview: Some(preview),
+            },
+        );
+    tokio::pin!(reply);
+    assert!(futures_util::poll!(reply.as_mut()).is_pending());
+    assert_eq!(previews.try_recv()?, "Looking up the color.");
+    assert!(futures_util::poll!(reply.as_mut()).is_pending());
+    assert_eq!(previews.try_recv()?, "");
+    assert_eq!(previews.try_recv()?, "The answer is");
+    let reply = reply.await?;
     assert_eq!(captured.try_recv()?, "<rendered:lookup> ");
     assert_eq!(
         captured.try_recv()?,

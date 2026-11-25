@@ -12,7 +12,7 @@ use super::{
 use anyhow::Result;
 use arta::{
     config::Config,
-    provider::Turn,
+    provider::{Turn, TurnObservers},
     stream::Frame as ReplyFrame,
     workflow::{Workflow, WorkflowEvent},
 };
@@ -40,7 +40,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::{
-    sync::mpsc,
+    sync::{mpsc, watch},
     time::{MissedTickBehavior, interval},
 };
 use unicode_segmentation::UnicodeSegmentation;
@@ -412,11 +412,24 @@ impl<'a> Tui<'a> {
         let observer = Arc::new(move |prompt: &str| {
             let _ = sender.send(prompt.to_owned());
         });
-        let mut replies = repl.reply(&turn.prompt, Some(observer));
+        let (preview, mut previews) = watch::channel(String::new());
+        let mut replies = repl.reply(
+            &turn.prompt,
+            Some(TurnObservers {
+                prompt: Some(observer),
+                reply_preview: Some(Arc::new(move |text: &str| {
+                    preview.send_modify(|pending| {
+                        pending.clear();
+                        pending.push_str(text);
+                    });
+                })),
+            }),
+        );
         let started = Instant::now();
         let mut refresh = interval(Duration::from_millis(33));
         refresh.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut dirty = false;
+        let mut receiving_reply = false;
         let error = loop {
             tokio::select! {
                 event = events.next() => {
@@ -432,12 +445,21 @@ impl<'a> Tui<'a> {
                     screen.draw(|frame| self.render(frame, repl.history(), Some(&turn)))?;
                     dirty = false;
                 }
+                Ok(()) = previews.changed(), if !receiving_reply => {
+                    turn.reply.clone_from(&previews.borrow_and_update());
+                    dirty = true;
+                }
                 frame = replies.next() => match frame {
                     Some(Ok(ReplyFrame::Chunk(text))) => {
                         turn.reply.push_str(&text);
                         dirty = true;
                     }
-                    Some(Ok(ReplyFrame::Begin)) => {}
+                    Some(Ok(ReplyFrame::Begin)) => {
+                        // Authoritative reply frames replace any provisional text.
+                        turn.reply.clear();
+                        receiving_reply = true;
+                        dirty = true;
+                    }
                     Some(Ok(ReplyFrame::End)) | None => break None,
                     Some(Err(error)) => break Some(format!("{error:#}")),
                 },

@@ -177,7 +177,7 @@ Configure MCP servers under `[mcp.servers]` to make their tools available in one
 
 Arta discovers tools at startup and exposes them as `server__tool` names, with periods replaced by underscores. One-shot prompts can use tools from all configured servers. In a REPL conversation, expose a server's tools with `@server-name` or the agent's `mcp_servers` setting. Set `tools` on a server to list the original names to expose. Omitting it exposes every tool the server advertises. The model can invoke exposed tools automatically, so configure servers and tools you trust to run.
 
-For llama.cpp, use a model with a chat template that supports tool calls. Arta runs up to eight calls per prompt and feeds text or structured JSON results back into the model. Tool schemas and results count toward the context limit. Each inference step has its own `max_tokens` budget. With tools enabled, Arta buffers inference steps and displays the final reply when it is ready.
+For llama.cpp, use a model with a chat template that supports tool calls. Arta runs up to eight calls per prompt and feeds text or structured JSON results back into the model. Tool schemas and results count toward the context limit. Each inference step has its own `max_tokens` budget. With tools enabled, full-screen chat previews assistant text during generation. Arta runs tool calls after parsing the complete inference step.
 
 Rust callers can implement `arta::tool::Tool` and use `Harness::register_tool` for in-process tools. Call `Harness::connect_mcp` to load configured MCP tools. Create sessions after registering tools so their agents receive the resulting tool set.
 
