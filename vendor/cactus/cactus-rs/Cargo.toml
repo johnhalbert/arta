@@ -1,0 +1,142 @@
+[package]
+name = "cactus-rs"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Safe Rust bindings for Cactus Compute's on-device engine: Needle tool calling, Whistle speech-to-text and Mirage vision"
+readme = "../README.md"
+homepage.workspace = true
+repository.workspace = true
+documentation = "https://docs.rs/cactus-rs"
+license.workspace = true
+keywords = ["cactus", "needle", "whistle", "mirage", "tool-calling"]
+categories = ["api-bindings", "science", "text-processing", "multimedia::audio", "computer-vision"]
+rust-version.workspace = true
+include = [
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+    "src/**/*.rs",
+    "examples/*.rs",
+    "benches/*.rs",
+    "tests/**/*.rs",
+    "tests/data/*",
+    "tests/data/clips/*",
+    "tests/data/images/*",
+]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[features]
+default = ["download-binaries", "download"]
+download-binaries = ["cactus-sys/download-binaries"]
+download = ["dep:ureq", "dep:sha2"]
+dynamic-link = ["cactus-sys/dynamic-link", "download", "dep:zip"]
+schemars = ["dep:schemars"]
+# `mirage::Image::open` and `Image::decode`: PNG and JPEG files, with EXIF orientation applied.
+image = ["dep:image"]
+
+[dependencies]
+cactus-sys = { path = "../cactus-sys", version = "0.3.0", default-features = false, features = [
+    "engine",
+] }
+serde = { version = "1.0", features = ["derive"] }
+# `preserve_order` is load-bearing: the model was trained on tool schemas in their declared key
+# order, and sorting the keys measurably lowers its confidence (1.00 -> 0.85 on the README example).
+serde_json = { version = "1.0", features = ["preserve_order"] }
+thiserror = "2"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+fancy-regex = "0.18"
+zip = { version = "4", default-features = false, features = ["deflate"], optional = true }
+ureq = { version = "3.4", default-features = false, features = [
+    "rustls",
+], optional = true }
+sha2 = { version = "0.11", default-features = false, optional = true }
+schemars = { version = "1.0", optional = true }
+image = { version = "0.25.5", default-features = false, features = [
+    "png",
+    "jpeg",
+], optional = true }
+
+[lib]
+name = "cactus_rs"
+path = "src/lib.rs"
+# The unit tests run under libtest, which rejects criterion flags such as `--quick`.
+bench = false
+
+[dev-dependencies]
+criterion = "0.7"
+hound = "3.5"
+proptest = "1.8"
+# Decodes the test image; the `image` feature of this crate enables the same crate for users.
+image = { version = "0.25.5", default-features = false, features = ["png"] }
+
+[[example]]
+name = "desktop"
+path = "examples/desktop.rs"
+required-features = ["download"]
+
+[[example]]
+name = "lights"
+path = "examples/lights.rs"
+required-features = ["download"]
+
+[[example]]
+name = "extract"
+path = "examples/extract.rs"
+required-features = ["download"]
+
+[[example]]
+name = "embed"
+path = "examples/embed.rs"
+required-features = ["download"]
+
+[[example]]
+name = "transcribe"
+path = "examples/transcribe.rs"
+required-features = ["download"]
+
+[[example]]
+name = "voice_lights"
+path = "examples/voice_lights.rs"
+required-features = ["download"]
+
+[[example]]
+name = "voice_stream"
+path = "examples/voice_stream.rs"
+required-features = ["download"]
+
+[[example]]
+name = "describe"
+path = "examples/describe.rs"
+required-features = ["download", "image"]
+
+[[example]]
+name = "custom_weights"
+path = "examples/custom_weights.rs"
+
+[[test]]
+name = "integration_tests"
+path = "tests/integration_tests.rs"
+
+[[test]]
+name = "needle_spec_tests"
+path = "tests/needle_spec_tests.rs"
+
+[[test]]
+name = "property_tests"
+path = "tests/property_tests.rs"
+
+[[test]]
+name = "whistle_tests"
+path = "tests/whistle_tests.rs"
+
+[[test]]
+name = "mirage_tests"
+path = "tests/mirage_tests.rs"
+
+[[bench]]
+name = "completion"
+path = "benches/completion.rs"
+harness = false

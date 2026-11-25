@@ -1,6 +1,6 @@
 # Arta architecture
 
-Arta runs local GGUF inference for three callers of the same Rust library. A one-shot prompt binds one agent to a model. An interactive conversation adds a controller that remembers completed turns. A workflow executes a tree of agent visits, keeping a separate conversation for each node. All three eventually reach the same provider, which can generate text directly or ask the application to execute a tool. [Binary entry point](src/main.rs) · [Library entry point](src/lib.rs)
+Arta runs local inference for three callers of the same Rust library. A one-shot prompt binds one agent to a model. An interactive conversation adds a controller that remembers completed turns. A workflow executes a tree of agent visits, keeping a separate conversation for each node. All three reach the selected provider for a reply or tool request. [Binary entry point](src/main.rs) · [Library entry point](src/lib.rs)
 
 ## Reading paths
 
@@ -44,10 +44,11 @@ flowchart TB
     Tools --> MCP["Local process or HTTP MCP server"]
     Tools --> Local["In-process tools and loop decisions"]
     Provider --> Llama["llama.cpp binding and native backend"]
+    Provider --> Cactus["Native Cactus worker"]
     GGUF["Local GGUF files"] --> Llama
 ```
 
-The executable owns argument handling, the REPL, terminal drawing, and output formatting. The library owns the model and tool contracts, MCP transport, skills, and workflow execution. The sole provider submitted by the application is `llama.cpp`. Tests and Rust clients can supply other implementations. [Provider contract](src/provider.rs) · [Factory registry](src/provider/registry.rs) · [llama.cpp registration](src/provider/llama_cpp.rs)
+The executable owns argument handling, the REPL, terminal drawing, and output formatting. The library owns the model and tool contracts, MCP transport, skills, and workflow execution. The application registers `llama.cpp` and `cactus`. Tests and Rust clients can supply other implementations. [Provider contract](src/provider.rs) · [Factory registry](src/provider/registry.rs) · [llama.cpp registration](src/provider/llama_cpp.rs) · [Cactus registration](src/provider/cactus.rs)
 
 ## Startup and configuration
 
@@ -65,7 +66,7 @@ flowchart TD
     WF --> Per["Apply CLI overrides to each profile copy"]
     Per --> Run["run_workflow with required prompt"]
     W -->|no| Profile["Apply optional standalone agent profile"]
-    Profile --> Flags["Apply provider and model IDs, then llama.cpp overrides"]
+    Profile --> Flags["Apply provider and model IDs, then provider settings overrides"]
     Flags --> Mode{"Prompt supplied?"}
     Mode -->|yes| Once["run_once"]
     Mode -->|no| Conversation["run_conversation"]
@@ -121,6 +122,8 @@ Session IDs must be nonblank and unique in the harness. Agent IDs must be nonbla
 | `Harness::run_workflow` / `Workflow::run` / `Workflow::events` | Definition or lookup name and original request. Execution creates new per-node state. | Last node's reply or a live event stream |
 
 A provider must implement model lookup and single-prompt inference. The default chat implementation delegates an empty history to `send`. Nonempty history, system instructions, tool use, runtime model switching, and per-profile reconfiguration require the corresponding provider support. A model handle exposes its provider-local ID and trained context length. [Provider defaults](src/provider.rs) · [Model interface](src/model.rs) · [Workflow execution](#workflow-definitions-and-execution)
+
+The Cactus provider registers model IDs and starts Arta in native worker mode on demand. The runtime module owns the child process and its JSON protocol. A tool turn owns one worker so the engine can interpret each result in the same conversation. The vendored `cactus-rs` crate handles model loading and grounding, and `cactus-sys` loads the shared C API. The Needle module maps completions to Arta's tools and extraction output. Dropping the turn terminates the worker, releasing its process-global model, and Arta's tool loop retains dispatch and the call budget. [Cactus provider](src/provider/cactus.rs) · [Worker transport](src/provider/cactus/runtime.rs) · [Vendored bindings](vendor/cactus/ARTA.md) · [Tool loop](src/provider/tool.rs)
 
 ## One-shot and framed streams
 

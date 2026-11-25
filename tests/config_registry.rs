@@ -6,7 +6,9 @@ use anyhow::Result;
 use arta::{
     config::Config,
     harness::Harness,
+    model::ModelId,
     provider::{
+        cactus::CactusCompute,
         llama_cpp::{LlamaCPP, LlamaCPPConfig, LlamaCPPOverrides},
         registry::ProviderRegistry,
     },
@@ -24,6 +26,42 @@ fn harness_creates_all_discovered_providers() -> Result<()> {
     for (id, _) in registry.list() {
         assert!(harness.provider(id).is_ok());
     }
+    Ok(())
+}
+
+#[test]
+fn cactus_model_selection_does_not_start_the_runtime() -> Result<()> {
+    let config: Config = toml::from_str(
+        r#"
+[providers.cactus.runtime]
+worker_path = "unavailable-worker"
+python = "unavailable-python"
+telemetry = true
+
+[[providers.cactus.models]]
+kind = "needle"
+id = "needle"
+
+[[providers.cactus.models]]
+kind = "needle"
+id = "needle-fast"
+threads = 4
+max_tokens = 64
+stateless = true
+"#,
+    )?;
+    let harness = Harness::new(&config)?;
+    let model = harness.model(ModelId {
+        provider: CactusCompute::ID,
+        model: "needle",
+    })?;
+    assert_eq!(model.trained_context_length(), 8192);
+    let provider = harness.provider(CactusCompute::ID)?;
+    assert_eq!(
+        provider.switch_model("needle", "needle-fast")?.id(),
+        "needle-fast"
+    );
+    assert!(provider.model("unknown-model").is_err());
     Ok(())
 }
 

@@ -6,7 +6,10 @@ mod agent;
 
 use crate::{
     mcp::McpConfig,
-    provider::llama_cpp::LlamaCPPOverrides,
+    provider::{
+        cactus::{CactusCompute, CactusConfig},
+        llama_cpp::LlamaCPPOverrides,
+    },
     skill::SkillConfig,
     workflow::{Workflow, WorkflowConfig},
 };
@@ -62,7 +65,7 @@ pub fn get() -> Result<&'static StartupConfig, &'static anyhow::Error> {
 #[derive(Default, Parser, Debug)]
 #[command(
     version,
-    about = "Run a prompt or workflow against a local GGUF model, or start a conversation",
+    about = "Run a prompt or workflow against a local model, or start a conversation",
     after_help = "Run arta with no arguments to open the terminal UI using config.toml."
 )]
 /// Command-line inputs before profile merging and path resolution.
@@ -104,11 +107,11 @@ struct Args {
     #[arg(short, long, value_name = "TEXT", required_unless_present_any = ["agent", "config"])]
     prompt: Option<String>,
 
-    /// Total token budget for the prompt and response (defaults to 4096 or the model's limit, whichever is lower).
+    /// llama.cpp token budget for the prompt and response.
     #[arg(short, long, value_name = "TOKENS")]
     context_length: Option<NonZeroU32>,
 
-    /// Maximum number of tokens to generate (defaults to 256).
+    /// Maximum number of tokens to generate per inference step.
     #[arg(long, value_name = "TOKENS")]
     max_tokens: Option<NonZeroU32>,
 
@@ -176,8 +179,7 @@ struct CliOverrides {
 }
 
 impl CliOverrides {
-    /// Select provider and model first so llama.cpp overrides update the intended model
-    /// entry.
+    /// Select provider and model before applying inference and file overrides.
     fn apply(&self, settings: &mut Config) -> Result<()> {
         if let Some(provider) = &self.provider {
             settings.app.provider.clone_from(provider);
@@ -185,7 +187,16 @@ impl CliOverrides {
         if let Some(model) = &self.model {
             settings.app.model.clone_from(model);
         }
-        self.llama.clone().apply(settings)
+        let mut llama = self.llama.clone();
+        if settings.app.provider == CactusCompute::ID {
+            let max_tokens = llama.max_tokens.take();
+            llama.apply(settings)?;
+            if let Some(max_tokens) = max_tokens {
+                CactusConfig::override_max_tokens(settings, max_tokens)?;
+            }
+            return Ok(());
+        }
+        llama.apply(settings)
     }
 }
 

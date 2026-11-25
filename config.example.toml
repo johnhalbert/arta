@@ -107,6 +107,29 @@ path = "gguf/Qwen3.5-4B-Q4_0.gguf"
 # additional_shards = [] # Remaining GGUF shard paths, in order.
 # kv_override = { key = "tokenizer.ggml.add_bos_token", value = true }
 
+# Select provider = "cactus" and model = "needle" in [app] to use Needle 3.
+# [providers.cactus.runtime]
+# worker_path = "path/to/arta.exe" # Optional override for Rust library callers.
+# library_path = "runtime/libcactus.dll" # Optional local native engine.
+# offline = false # Use cached or local assets only when true.
+#
+# [[providers.cactus.models]]
+# kind = "needle"
+# id = "needle"
+# weights = "models/needle3.cact" # Omit for the published base model.
+# tool_index_path = "models/tools.index" # Reserved SDK tool index archive.
+# buffer_size = 65536 # Response buffer size in bytes.
+# threads = 0 # Use the engine's automatic thread count.
+# max_tokens = 512 # Per inference step.
+# max_steps = 8 # Tool batches per prompt, within Arta's eight-call budget.
+# system = "locale: en-US" # Optional system facts.
+# auto_date = true
+# stateless = false # Set true to ignore earlier prompts.
+# strict = true # Reject batches flagged by Needle's grounding checks.
+# min_confidence = 0.7 # Optional. An unset score is rejected when a minimum is configured.
+# triggers = { weather__lookup = ['\bweather\b'] } # Optional patterns by Arta tool name.
+# extraction_schema = "schemas/contact.json" # Optional JSON schema for prompts without tools.
+
 # [mcp.servers.local]
 # command = "path/to/mcp-server"
 # args = []

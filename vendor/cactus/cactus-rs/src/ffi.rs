@@ -1,0 +1,743 @@
+//! The crate's only door into the C API, and the only module with `unsafe` in it.
+//!
+//! The engine is one process-global, non-thread-safe runtime that holds one model per kind (text,
+//! speech and vision) and one error string for all of them. Three things make that safe to drive from Rust:
+//!
+//! - **One lock.** [`ENGINE`] guards every C call. [`lock`] returns a [`Guard`], and only a
+//!   `Guard` has methods that reach the engine, so two calls never overlap, whichever model or
+//!   thread they come from. [`Guard::last_error`] copies the engine's error string before the
+//!   guard can be released, as the header requires.
+//! - **One slot per kind.** [`Slot::take`] claims the text, speech or vision model for one value
+//!   (a `Needle`, a `Whistle` or a `Mirage`), and its `Drop` gives the claim back.
+//! - **Types for the pointer rules.** [`Input`] makes "exactly one of `input` and `pcm` is
+//!   non-null" unrepresentable to get wrong, slices carry their own lengths, and every length
+//!   that crosses into an `int` is clamped to [`c_int::MAX`], which only ever under-reports an
+//!   allocation.
+//!
+//! ## Lock ordering
+//!
+//! [`Slot::take`] and `Slot`'s `Drop` lock [`ENGINE`] themselves, and the mutex is not
+//! re-entrant. A thread holding a [`Guard`] must therefore never take or drop a [`Slot`]. Where
+//! both live in one scope, declare the slot **before** the guard: locals drop in reverse order,
+//! so the guard is released before the slot's `Drop` locks again.
+//!
+//! A poisoned lock is recovered with [`PoisonError::into_inner`]: the state it protects is a few
+//! flags and fingerprints that every writer leaves consistent, and the engine itself has no Rust
+//! invariants a panic could break.
+
+use std::ffi::{CStr, CString, c_char, c_int, c_ulonglong};
+use std::ptr;
+use std::sync::{Mutex, MutexGuard, PoisonError};
+
+use crate::archive;
+use crate::error::{Error, Result};
+use crate::model::Model;
+
+/// The most samples one embedding or audio completion may carry: 30 seconds at 16 kHz.
+///
+/// Transcription is not bound by it: since engine 4, a longer clip is transcribed as consecutive
+/// 30 second windows.
+pub(crate) const MAX_SAMPLES: usize = 480_000;
+
+/// Everything this crate knows about the engine, behind the one lock that serialises it.
+static ENGINE: Mutex<State> = Mutex::new(State {
+    taken: [false; KINDS],
+    loaded: [None; KINDS],
+});
+
+/// How many kinds of model the engine holds: the length of [`State`]'s arrays.
+const KINDS: usize = 3;
+
+/// What [`ENGINE`] protects.
+struct State {
+    /// Whether a value holds the slot of each kind, indexed by [`Kind::index`].
+    taken: [bool; KINDS],
+    /// Fingerprint of the archive loaded as each kind, set once and never cleared, because the
+    /// engine cannot unload weights.
+    loaded: [Option<u64>; KINDS],
+}
+
+/// The kinds of model the engine holds at once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Kind {
+    /// The text model, Needle.
+    Text,
+    /// The speech model, Whistle.
+    Speech,
+    /// The vision model, Mirage.
+    Vision,
+}
+
+impl Kind {
+    /// This kind's bit in the [`Guard::models`] mask.
+    pub(crate) const fn bit(self) -> c_int {
+        match self {
+            Kind::Text => cactus_sys::CACTUS_TEXT,
+            Kind::Speech => cactus_sys::CACTUS_SPEECH,
+            Kind::Vision => cactus_sys::CACTUS_VISION,
+        }
+    }
+
+    /// Position in [`State`]'s arrays.
+    const fn index(self) -> usize {
+        match self {
+            Kind::Text => 0,
+            Kind::Speech => 1,
+            Kind::Vision => 2,
+        }
+    }
+
+    /// The model this crate builds for the kind.
+    const fn model(self) -> Model {
+        match self {
+            Kind::Text => Model::Needle,
+            Kind::Speech => Model::Whistle,
+            Kind::Vision => Model::Mirage,
+        }
+    }
+}
+
+/// What one completion or embedding is about: exactly one of text and a clip.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Input<'a> {
+    /// A NUL-terminated string for the text model.
+    Text(&'a CStr),
+    /// 16 kHz mono PCM for the speech model.
+    Audio(&'a [f32]),
+}
+
+impl Input<'_> {
+    /// The `(input, pcm, samples)` triple the C API takes, with exactly one pointer non-null.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::AudioTooLong`] for a clip over [`MAX_SAMPLES`]: the header makes that a
+    /// precondition, so it is checked here rather than trusted to the caller.
+    fn raw(self) -> Result<(*const c_char, *const f32, c_int)> {
+        match self {
+            Input::Text(text) => Ok((text.as_ptr(), ptr::null(), 0)),
+            // A slice pointer is never null, even for an empty clip, so `pcm` is the non-null one.
+            Input::Audio(pcm) => Ok((ptr::null(), pcm.as_ptr(), samples(pcm)?)),
+        }
+    }
+}
+
+/// A clip's length as the C API's `int`, refusing clips over [`MAX_SAMPLES`].
+fn samples(pcm: &[f32]) -> Result<c_int> {
+    if pcm.len() > MAX_SAMPLES {
+        return Err(Error::AudioTooLong { samples: pcm.len() });
+    }
+    // At most 480 000, so this always fits.
+    Ok(clamp(pcm.len()))
+}
+
+/// A clip's length as the C API's `int`, for the calls that take audio of any length.
+fn any_samples(pcm: &[f32]) -> Result<c_int> {
+    c_int::try_from(pcm.len()).map_err(|_| Error::AudioTooLong { samples: pcm.len() })
+}
+
+/// A buffer length as the C API's `int`. Clamping only ever under-reports the allocation.
+fn clamp(len: usize) -> c_int {
+    c_int::try_from(len).unwrap_or(c_int::MAX)
+}
+
+/// Packed RGB pixels whose length is known to match their dimensions.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Pixels<'a> {
+    rgb: &'a [u8],
+    width: c_int,
+    height: c_int,
+}
+
+impl<'a> Pixels<'a> {
+    /// Pixels from a buffer of exactly `width * height * 3` bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidImage`] when a dimension is zero, when the buffer is not that
+    /// long, or when a dimension or the byte count does not fit the C API's `int`.
+    pub(crate) fn new(rgb: &'a [u8], width: u32, height: u32) -> Result<Self> {
+        let invalid = || Error::InvalidImage {
+            width,
+            height,
+            len: rgb.len(),
+        };
+        // 128 bits: two `u32` dimensions times three do not fit in 64.
+        let bytes = u128::from(width) * u128::from(height) * 3;
+        if width == 0 || height == 0 || bytes != rgb.len() as u128 {
+            return Err(invalid());
+        }
+        // The engine computes the byte count in `int`s; keep the product inside one.
+        c_int::try_from(bytes).map_err(|_| invalid())?;
+        Ok(Pixels {
+            rgb,
+            width: c_int::try_from(width).map_err(|_| invalid())?,
+            height: c_int::try_from(height).map_err(|_| invalid())?,
+        })
+    }
+}
+
+/// The transcription settings, already in the shape the C API takes.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct EncodedAudio {
+    /// A language code, or `None` to detect it.
+    language: Option<CString>,
+    /// Newline-separated keywords, or `None` for none.
+    keywords: Option<CString>,
+    /// `1` to report word timestamps, `0` not to.
+    word_timestamps: c_int,
+}
+
+impl EncodedAudio {
+    /// Settings from their encoded parts.
+    pub(crate) fn new(
+        language: Option<CString>,
+        keywords: Option<CString>,
+        word_timestamps: bool,
+    ) -> Self {
+        EncodedAudio {
+            language,
+            keywords,
+            word_timestamps: c_int::from(word_timestamps),
+        }
+    }
+
+    /// The language code, or `None` to detect it.
+    #[cfg(test)]
+    pub(crate) fn language(&self) -> Option<&CStr> {
+        self.language.as_deref()
+    }
+
+    /// The newline-separated keywords, or `None` for none.
+    #[cfg(test)]
+    pub(crate) fn keywords(&self) -> Option<&CStr> {
+        self.keywords.as_deref()
+    }
+
+    /// Whether word timestamps are asked for.
+    #[cfg(test)]
+    pub(crate) fn word_timestamps(&self) -> bool {
+        self.word_timestamps != 0
+    }
+
+    /// The `(language, keywords, word_timestamps)` triple, each pointer null or a C string that
+    /// lives as long as `self`.
+    fn raw(&self) -> (*const c_char, *const c_char, c_int) {
+        (
+            self.language.as_deref().map_or(ptr::null(), CStr::as_ptr),
+            self.keywords.as_deref().map_or(ptr::null(), CStr::as_ptr),
+            self.word_timestamps,
+        )
+    }
+}
+
+/// Exclusive use of the engine for as long as it lives. Every C call goes through one.
+pub(crate) struct Guard(MutexGuard<'static, State>);
+
+impl Guard {
+    pub(crate) fn set_threads(&mut self, threads: c_int) -> Result<()> {
+        require_engine()?;
+        // SAFETY: the process-wide engine lock is held for this call.
+        unsafe { cactus_sys::cactus_set_threads(threads) };
+        Ok(())
+    }
+}
+
+fn require_engine() -> Result<()> {
+    #[cfg(feature = "dynamic-link")]
+    if !cactus_sys::is_library_loaded() {
+        return Err(std::io::Error::other(
+            "load the Cactus shared library before building a model",
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// Takes the engine lock, waiting for whoever has it.
+///
+/// Must not be called by a thread that already holds a [`Guard`]; see the module docs.
+pub(crate) fn lock() -> Guard {
+    Guard(ENGINE.lock().unwrap_or_else(PoisonError::into_inner))
+}
+
+impl Guard {
+    /// The bitmask of loaded kinds; see [`Kind::bit`].
+    pub(crate) fn models(&mut self) -> c_int {
+        // SAFETY: the guard holds ENGINE, so no other engine call is in flight; the function
+        // takes no pointers.
+        unsafe { cactus_sys::cactus_models() }
+    }
+
+    /// The engine's reason for the last failure, copied out; empty when it gave none.
+    pub(crate) fn last_error(&mut self) -> String {
+        // SAFETY: the guard holds ENGINE, so no other engine call is in flight, and nothing is
+        // called between this and the copy below, so the runtime-owned string is still valid.
+        let reason = unsafe { cactus_sys::cactus_last_error() };
+        if reason.is_null() {
+            return String::new();
+        }
+        // SAFETY: non-null, NUL-terminated per the header, and valid until the next engine
+        // call, which cannot happen while this guard is held; it is copied before returning.
+        unsafe { CStr::from_ptr(reason) }
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    /// Loads an archive. Only [`Slot::load`] calls this, after its fingerprint checks.
+    fn load(&mut self, bytes: &[u8]) -> c_int {
+        // SAFETY: the guard holds ENGINE, so no other engine call is in flight. `bytes` is valid
+        // for reads of `bytes.len()` bytes for the whole call, and that is the length passed
+        // (a `usize` always fits a `c_ulonglong`). The engine copies what it needs before
+        // returning.
+        unsafe { cactus_sys::cactus_load(bytes.as_ptr(), bytes.len() as c_ulonglong) }
+    }
+
+    /// Builds the text model's conversation prefix and returns its token count.
+    pub(crate) fn init(
+        &mut self,
+        system: Option<&CStr>,
+        tools: &CStr,
+        tool_index: Option<&CStr>,
+    ) -> c_int {
+        let system = system.map_or(ptr::null(), CStr::as_ptr);
+        let tool_index = tool_index.map_or(ptr::null(), CStr::as_ptr);
+        // SAFETY: the guard holds ENGINE, so no other engine call is in flight. Each pointer is
+        // null or a NUL-terminated string borrowed for the whole call. A missing text model is a
+        // failure the engine reports, not undefined behaviour.
+        unsafe { cactus_sys::cactus_init(system, tools.as_ptr(), tool_index) }
+    }
+
+    /// Runs one completion, writing the NUL-terminated envelope into `out`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::AudioTooLong`] for a clip over [`MAX_SAMPLES`]; the engine's own
+    /// failures come back as a negative count, as in C.
+    pub(crate) fn complete(
+        &mut self,
+        input: Input<'_>,
+        max_new_tokens: c_int,
+        out: &mut [u8],
+    ) -> Result<c_int> {
+        let (text, pcm, samples) = input.raw()?;
+        let capacity = clamp(out.len());
+        // SAFETY: the guard holds ENGINE, so no other engine call is in flight. `Input::raw`
+        // gives exactly one non-null pointer: a NUL-terminated string, or `samples` (at most
+        // MAX_SAMPLES) readable floats, both borrowed for the call. `out` is valid for writes of
+        // `out.len()` bytes and `capacity` is no larger.
+        let rc = unsafe {
+            cactus_sys::cactus_complete(
+                text,
+                pcm,
+                samples,
+                max_new_tokens,
+                out.as_mut_ptr().cast::<c_char>(),
+                capacity,
+            )
+        };
+        Ok(rc)
+    }
+
+    /// Configures the transcription an audio completion runs for itself.
+    pub(crate) fn set_audio(&mut self, audio: &EncodedAudio) {
+        let (language, keywords, word_timestamps) = audio.raw();
+        // SAFETY: the guard holds ENGINE, so no other engine call is in flight. Both pointers
+        // are null or NUL-terminated strings owned by `audio`, borrowed for the call; the engine
+        // copies them.
+        unsafe { cactus_sys::cactus_set_audio(language, keywords, word_timestamps) };
+    }
+
+    /// Transcribes one clip of any length, writing the NUL-terminated envelope into `out`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::AudioTooLong`] for a clip whose length does not fit the C API's `int`
+    /// (over 37 hours); the engine's own failures come back as a negative count, as in C.
+    pub(crate) fn transcribe(
+        &mut self,
+        pcm: &[f32],
+        audio: &EncodedAudio,
+        out: &mut [u8],
+    ) -> Result<c_int> {
+        let samples = any_samples(pcm)?;
+        let (language, keywords, word_timestamps) = audio.raw();
+        let capacity = clamp(out.len());
+        // SAFETY: the guard holds ENGINE, so no other engine call is in flight. `pcm` is
+        // readable for `samples` floats (exactly its length), the two strings are null or
+        // NUL-terminated and owned by `audio`, and `out` is valid for writes of `out.len()`
+        // bytes with `capacity` no larger; all are borrowed for the call.
+        let rc = unsafe {
+            cactus_sys::cactus_transcribe(
+                pcm.as_ptr(),
+                samples,
+                language,
+                keywords,
+                word_timestamps,
+                out.as_mut_ptr().cast::<c_char>(),
+                capacity,
+            )
+        };
+        Ok(rc)
+    }
+
+    /// Feeds audio to the live transcription, writing what this pass committed into `out`.
+    ///
+    /// The word-timestamp setting of `audio` is not used: a live transcription always reports
+    /// its words.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::AudioTooLong`] for a feed whose length does not fit the C API's `int`;
+    /// the engine's own failures come back as a negative count, as in C.
+    pub(crate) fn stream_process(
+        &mut self,
+        pcm: &[f32],
+        audio: &EncodedAudio,
+        out: &mut [u8],
+    ) -> Result<c_int> {
+        let samples = any_samples(pcm)?;
+        let (language, keywords, _) = audio.raw();
+        let capacity = clamp(out.len());
+        // SAFETY: the guard holds ENGINE, so no other engine call is in flight. `pcm` is
+        // readable for `samples` floats (exactly its length), the two strings are null or
+        // NUL-terminated and owned by `audio`, and `out` is valid for writes of `out.len()`
+        // bytes with `capacity` no larger; all are borrowed for the call.
+        let rc = unsafe {
+            cactus_sys::cactus_stream_transcribe_process(
+                pcm.as_ptr(),
+                samples,
+                language,
+                keywords,
+                out.as_mut_ptr().cast::<c_char>(),
+                capacity,
+            )
+        };
+        Ok(rc)
+    }
+
+    /// Ends the live transcription, writing its tail into `out`. With no stream open it writes
+    /// an empty update.
+    pub(crate) fn stream_stop(&mut self, out: &mut [u8]) -> c_int {
+        let capacity = clamp(out.len());
+        // SAFETY: the guard holds ENGINE, so no other engine call is in flight. `out` is valid
+        // for writes of `out.len()` bytes and `capacity` is no larger.
+        unsafe {
+            cactus_sys::cactus_stream_transcribe_stop(out.as_mut_ptr().cast::<c_char>(), capacity)
+        }
+    }
+
+    /// How many floats embedding `input` takes, computing nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::AudioTooLong`] for a clip over [`MAX_SAMPLES`]; the engine's own
+    /// failures come back as a negative count, as in C.
+    pub(crate) fn embed_len(&mut self, input: Input<'_>) -> Result<c_int> {
+        let (text, pcm, samples) = input.raw()?;
+        // SAFETY: the guard holds ENGINE, so no other engine call is in flight. `Input::raw`
+        // gives exactly one non-null input pointer, valid for the call, and a null `out` with
+        // capacity 0 is the documented size query.
+        let rc = unsafe { cactus_sys::cactus_embed(text, pcm, samples, ptr::null_mut(), 0) };
+        Ok(rc)
+    }
+
+    /// Embeds `input` into `out`, returning the float count written.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::AudioTooLong`] for a clip over [`MAX_SAMPLES`]; the engine's own
+    /// failures come back as a negative count, as in C.
+    pub(crate) fn embed(&mut self, input: Input<'_>, out: &mut [f32]) -> Result<c_int> {
+        let (text, pcm, samples) = input.raw()?;
+        let capacity = clamp(out.len());
+        // SAFETY: the guard holds ENGINE, so no other engine call is in flight. `Input::raw`
+        // gives exactly one non-null input pointer, valid for the call; `out` is valid for
+        // writes of `out.len()` floats and `capacity` is no larger.
+        let rc =
+            unsafe { cactus_sys::cactus_embed(text, pcm, samples, out.as_mut_ptr(), capacity) };
+        Ok(rc)
+    }
+
+    /// Describes an image, writing the NUL-terminated JSON document into `out`.
+    ///
+    /// The engine's failures come back as a negative count, as in C.
+    pub(crate) fn describe(
+        &mut self,
+        image: Pixels<'_>,
+        options: &CStr,
+        language: Option<&CStr>,
+        keywords: Option<&CStr>,
+        out: &mut [u8],
+    ) -> c_int {
+        let language = language.map_or(ptr::null(), CStr::as_ptr);
+        let keywords = keywords.map_or(ptr::null(), CStr::as_ptr);
+        let capacity = clamp(out.len());
+        // SAFETY: the guard holds ENGINE, so no other engine call is in flight. `Pixels::new`
+        // is the only constructor and guarantees that `rgb` is readable for exactly
+        // `width * height * 3` bytes with both dimensions positive `c_int`s. `options` is a
+        // NUL-terminated string and the other two are null or NUL-terminated, all borrowed for
+        // the call. `out` is valid for writes of `out.len()` bytes and `capacity` is no larger.
+        unsafe {
+            cactus_sys::cactus_describe(
+                image.rgb.as_ptr(),
+                image.width,
+                image.height,
+                options.as_ptr(),
+                language,
+                keywords,
+                out.as_mut_ptr().cast::<c_char>(),
+                capacity,
+            )
+        }
+    }
+
+    /// Rewinds the text model's conversation to its prefix.
+    pub(crate) fn reset(&mut self) {
+        // SAFETY: the guard holds ENGINE, so no other engine call, of either kind, is in flight;
+        // the function takes no pointers.
+        unsafe { cactus_sys::cactus_reset() };
+    }
+}
+
+/// One value's claim on one kind of model, released on drop.
+///
+/// It exists so that an error between taking the slot and building the value that keeps it still
+/// frees it: the slot is dropped on the way out whichever path is taken.
+#[derive(Debug)]
+pub(crate) struct Slot {
+    kind: Kind,
+}
+
+impl Slot {
+    /// Claims `kind`, or reports that another value has it.
+    ///
+    /// Locks [`ENGINE`], so the caller must not hold a [`Guard`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EngineBusy`] while another slot of the same kind is alive.
+    pub(crate) fn take(kind: Kind) -> Result<Self> {
+        let mut guard = lock();
+        let taken = &mut guard.0.taken[kind.index()];
+        if *taken {
+            return Err(Error::EngineBusy);
+        }
+        *taken = true;
+        Ok(Slot { kind })
+    }
+
+    /// Loads `bytes` as this slot's kind, unless that archive is already loaded.
+    ///
+    /// The archive loaded as this kind, known by its fingerprint, is reused without the engine.
+    /// Any other archive is classified from its tensor directory first, so that only an archive
+    /// of this kind ever reaches `cactus_load`: one of the other kind is [`Error::WrongModel`]
+    /// (checked before a mismatch of this kind, so a wrong archive is named as such whatever
+    /// else is loaded), and one of this kind while another is loaded is
+    /// [`Error::WeightsAlreadyLoaded`].
+    ///
+    /// The engine would not refuse either. Measured against the pinned engine by the cactus-sys
+    /// probes `probe_text_reload.rs`, `probe_speech_reload.rs`, `probe_cross_kind.rs` and
+    /// `probe_same_reload.rs`: a load of a kind already held hot-swaps that kind's model, and a
+    /// text load, even of the same bytes, drops the `cactus_init` prefix; the kinds are
+    /// independent, and a rejected load changes nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::WrongModel`] when the archive is of the other kind,
+    /// [`Error::UnsupportedWeights`] when its tensor directory cannot be read,
+    /// [`Error::WeightsAlreadyLoaded`] when a different archive of this kind is loaded, and
+    /// [`Error::LoadFailed`] with the engine's reason when it rejects the archive or does not
+    /// report it loaded.
+    pub(crate) fn load(&self, guard: &mut Guard, bytes: &[u8]) -> Result<()> {
+        require_engine()?;
+        let mine = self.kind;
+        let wanted = fingerprint(bytes);
+
+        // Already loaded as this kind: nothing to do. Loading it again would not be harmless:
+        // the engine drops the text prefix on every text load.
+        if guard.0.loaded[mine.index()] == Some(wanted) {
+            return Ok(());
+        }
+
+        // The engine would load an archive of the other kind over that kind's model, so it is
+        // refused here, before the engine sees it.
+        match archive::kind_of(bytes) {
+            Some(model) if model == mine.model() => {}
+            Some(_) => {
+                return Err(Error::WrongModel {
+                    expected: mine.model(),
+                });
+            }
+            // The magic tag was checked when the weights were made; the directory after it is
+            // what does not hold up.
+            None => {
+                return Err(Error::UnsupportedWeights {
+                    tag: archive::MAGIC,
+                });
+            }
+        }
+
+        // A different archive of this kind would hot-swap the loaded model; the first archive
+        // owns the process.
+        if guard.0.loaded[mine.index()].is_some() {
+            return Err(Error::WeightsAlreadyLoaded);
+        }
+
+        let rc = guard.load(bytes);
+        if rc < 0 {
+            // Copied while the guard is held: the string is valid only until the next call.
+            return Err(Error::LoadFailed {
+                model: mine.model(),
+                detail: or_unexplained(guard.last_error(), "cactus_load", rc),
+            });
+        }
+
+        // Defensive: the classification above says which bit the load sets. If the engine
+        // disagrees, nothing is recorded, so the same bytes never pass for loaded.
+        let models = guard.models();
+        if models & mine.bit() == 0 {
+            return Err(Error::LoadFailed {
+                model: mine.model(),
+                detail: format!(
+                    "engine reported models {models:#04b} after loading a {} archive",
+                    mine.model()
+                ),
+            });
+        }
+
+        guard.0.loaded[mine.index()] = Some(wanted);
+        Ok(())
+    }
+}
+
+/// The engine's reason, or a note of what failed when it gave none.
+pub(crate) fn or_unexplained(reason: String, call: &str, rc: c_int) -> String {
+    if reason.is_empty() {
+        format!("{call} returned {rc} and gave no reason")
+    } else {
+        reason
+    }
+}
+
+/// Gives the claim back. Locks [`ENGINE`]: never drop a slot while holding a [`Guard`].
+impl Drop for Slot {
+    fn drop(&mut self) {
+        lock().0.taken[self.kind.index()] = false;
+    }
+}
+
+/// Word-wise FNV-1a over the archive, enough to tell two weight files apart.
+///
+/// A 64-bit non-cryptographic hash, so this is not a security check (the archive has already
+/// been verified by whoever produced it),
+/// only a way to answer "are these the bytes already loaded?" without keeping 35 MB alive or
+/// depending on a hash crate the `download` feature happens to pull in.
+fn fingerprint(bytes: &[u8]) -> u64 {
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    // Eight bytes per round rather than one: every `build()` pays for this pass over a 35 MB
+    // archive, and byte-at-a-time FNV made it the slowest step of building a `Needle`.
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64 ^ bytes.len() as u64;
+    let mut words = bytes.chunks_exact(8);
+    for word in &mut words {
+        let mut buffer = [0u8; 8];
+        buffer.copy_from_slice(word);
+        hash = (hash ^ u64::from_le_bytes(buffer)).wrapping_mul(PRIME);
+    }
+    for byte in words.remainder() {
+        hash = (hash ^ u64::from(*byte)).wrapping_mul(PRIME);
+    }
+    hash
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn different_archives_fingerprint_differently() {
+        assert_ne!(fingerprint(b"needle-a"), fingerprint(b"needle-b"));
+        assert_ne!(fingerprint(b"needle"), fingerprint(b"needle\0"));
+        assert_eq!(fingerprint(b"needle"), fingerprint(b"needle"));
+    }
+
+    // Only the speech slot: no other unit test in this process takes it, while a text slot could
+    // one day be taken by a Needle test running in parallel.
+    #[test]
+    fn a_slot_is_exclusive_until_dropped() {
+        let slot = Slot::take(Kind::Speech).expect("nothing else takes the speech slot");
+        assert!(matches!(Slot::take(Kind::Speech), Err(Error::EngineBusy)));
+        drop(slot);
+        drop(Slot::take(Kind::Speech).expect("the slot was freed"));
+    }
+
+    #[test]
+    fn kinds_map_to_distinct_bits_and_models() {
+        assert_eq!(Kind::Text.bit() & Kind::Speech.bit(), 0);
+        assert_eq!(
+            Kind::Vision.bit() & (Kind::Text.bit() | Kind::Speech.bit()),
+            0
+        );
+        assert_eq!(Kind::Vision.model(), Model::Mirage);
+        let indices = [
+            Kind::Text.index(),
+            Kind::Speech.index(),
+            Kind::Vision.index(),
+        ];
+        assert_eq!(indices, [0, 1, 2]);
+        assert!(indices.iter().all(|index| *index < KINDS));
+        assert_eq!(Kind::Speech.model(), Model::Whistle);
+        assert_eq!(Kind::Text.model(), Model::Needle);
+    }
+
+    #[test]
+    fn input_puts_exactly_one_pointer_in_play() {
+        let (text, pcm, samples) = Input::Text(c"kitchen")
+            .raw()
+            .expect("text is never too long");
+        assert!(!text.is_null() && pcm.is_null() && samples == 0);
+
+        let (text, pcm, samples) = Input::Audio(&[]).raw().expect("an empty clip is short");
+        assert!(text.is_null() && !pcm.is_null() && samples == 0);
+    }
+
+    #[test]
+    fn a_clip_over_thirty_seconds_never_reaches_the_engine() {
+        let clip = vec![0.0_f32; MAX_SAMPLES + 1];
+        let error = Input::Audio(&clip).raw().expect_err("too long");
+        assert!(matches!(error, Error::AudioTooLong { samples } if samples == MAX_SAMPLES + 1));
+        assert!(Input::Audio(&clip[..MAX_SAMPLES]).raw().is_ok());
+    }
+
+    #[test]
+    fn pixels_must_match_their_dimensions() {
+        assert!(Pixels::new(&[0; 12], 2, 2).is_ok());
+        for (len, width, height) in [(11, 2, 2), (13, 2, 2), (0, 0, 0), (0, 0, 4), (3, 1, 0)] {
+            let buffer = vec![0_u8; len];
+            let error = Pixels::new(&buffer, width, height).expect_err("a mismatch");
+            assert!(
+                matches!(error, Error::InvalidImage { width: w, height: h, len: l }
+                    if w == width && h == height && l == len)
+            );
+        }
+        // Dimensions whose byte count overflows an `int` never reach the engine.
+        assert!(Pixels::new(&[], u32::MAX, u32::MAX).is_err());
+    }
+
+    #[test]
+    fn lengths_clamp_to_an_int() {
+        assert_eq!(clamp(usize::MAX), c_int::MAX);
+        assert_eq!(clamp(7), 7);
+    }
+
+    #[test]
+    fn encoded_audio_passes_nulls_for_unset_fields() {
+        let (language, keywords, words) = EncodedAudio::default().raw();
+        assert!(language.is_null() && keywords.is_null() && words == 0);
+
+        let audio = EncodedAudio::new(Some(c"de".to_owned()), None, true);
+        let (language, keywords, words) = audio.raw();
+        assert!(!language.is_null() && keywords.is_null() && words == 1);
+    }
+}

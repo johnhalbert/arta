@@ -10,6 +10,8 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use futures_util::{future::BoxFuture, stream};
 
+pub(crate) const MAX_CALLS_PER_PROMPT: u32 = 8;
+
 /// The current inference turn, including tool exchanges that have already completed.
 pub struct ToolRequest<'a> {
     /// Selection within the adapter's provider.
@@ -63,6 +65,11 @@ pub enum ToolResponse {
 
 /// Renders one inference step for a provider and interprets its model's response.
 pub trait ToolAdapter: Send + Sync {
+    /// Create inference state owned by a single tool turn, when the engine needs it.
+    fn begin_turn(&self, _model_id: &str) -> Result<Option<Box<dyn ToolTurn>>> {
+        Ok(None)
+    }
+
     /// Evaluate one request, returning final text or parsed tool calls.
     fn infer<'a>(&'a self, request: ToolRequest<'a>) -> BoxFuture<'a, Result<ToolResponse>>;
 
@@ -84,6 +91,17 @@ pub trait ToolAdapter: Send + Sync {
     ) -> BoxFuture<'a, Result<ToolResponse>> {
         self.infer_observed(request, observer)
     }
+}
+
+/// Inference state that survives tool exchanges within a turn and is dropped on cancellation.
+pub trait ToolTurn: Send {
+    /// Evaluate the next step using the same engine conversation.
+    fn infer<'a>(
+        &'a mut self,
+        request: ToolRequest<'a>,
+        past_exchanges: &'a [Vec<ToolExchange>],
+        observer: Option<PromptObserver>,
+    ) -> BoxFuture<'a, Result<ToolResponse>>;
 }
 
 /// Use the provider's single-prompt entry point for an empty registry. Otherwise start tool
@@ -154,21 +172,26 @@ pub(crate) async fn chat_recorded(
     let adapter = provider
         .tool_adapter()
         .context("this provider does not support tool use")?;
+    let mut turn = adapter.begin_turn(request.model_id)?;
     let mut exchanges = Vec::new();
-    const MAX_CALLS: usize = 8;
-    let mut remaining_calls = MAX_CALLS;
+    let mut remaining_calls = MAX_CALLS_PER_PROMPT as usize;
 
     loop {
-        let response = adapter
-            .infer_recorded(
-                ToolRequest {
-                    exchanges: &exchanges,
-                    ..request
-                },
-                past_exchanges,
-                observer.clone(),
-            )
-            .await?;
+        let request = ToolRequest {
+            exchanges: &exchanges,
+            ..request
+        };
+        let response = match &mut turn {
+            Some(turn) => {
+                turn.infer(request, past_exchanges, observer.clone())
+                    .await?
+            }
+            None => {
+                adapter
+                    .infer_recorded(request, past_exchanges, observer.clone())
+                    .await?
+            }
+        };
         let (content, reasoning, calls) = match response {
             ToolResponse::Reply(reply) => {
                 return Ok((Message::new(stream::iter([Ok(reply)])), exchanges));
@@ -185,7 +208,7 @@ pub(crate) async fn chat_recorded(
         );
         ensure!(
             calls.len() <= remaining_calls,
-            "the model exceeded the limit of {MAX_CALLS} tool calls per prompt"
+            "the model exceeded the limit of {MAX_CALLS_PER_PROMPT} tool calls per prompt"
         );
         remaining_calls -= calls.len();
 

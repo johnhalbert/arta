@@ -11,6 +11,7 @@ vulkan = ["llama-cpp-4/vulkan"]
 
 [dependencies]
 anyhow = "1"
+cactus-rs = { version = "0.3.0", default-features = false, features = ["dynamic-link"] }
 clap = { version = "4.6.7", features = ["derive"] }
 crossterm = { version = "0.29", features = ["event-stream"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
@@ -28,4 +29,6 @@ tui-markdown = { version = "0.3.13", default-features = false }
 unicode-segmentation = "1"
 
 [patch.crates-io]
+cactus-rs = { path = "vendor/cactus/cactus-rs" }
+cactus-sys = { path = "vendor/cactus/cactus-sys" }
 llama-cpp-4 = { path = "vendor/llama-cpp-4" }

@@ -1,0 +1,37 @@
+# Pinned Cactus Compute engine release.
+#
+# `build.rs` reads this file with `include_str!` and a small `key = "value"` scanner, so the
+# syntax stays a strict subset of TOML: comments, one table header, and quoted scalar values.
+#
+# One engine runs Needle 3 (text), Whistle (speech) and Mirage (vision). Upstream publishes it as
+# `releases/<release>/<platform>/libcactus.a`, with a `manifest.json` per release that lists the
+# size and SHA-256 of every file.
+#
+# To move the pin: bump `commit` and `release`, and replace the digests below with the
+# `<platform>/libcactus.a` entries of
+# `https://huggingface.co/<repo>/resolve/<commit>/releases/<release>/manifest.json`. All
+# platforms ship the same `cactus.h`
+# (sha256 9be7eb25b1d89180495d04a0d2c27053f282dac85add50cacc48d73302819d9d), vendored as
+# `include/cactus.h` for reference.
+
+repo = "Cactus-Compute/cactus"
+commit = "d2c5cd70432ed78345f3ba6b620bff2feeec6c86"
+release = "4.1.1"
+
+# sha256 of `releases/<release>/<platform>/libcactus.a` at the commit above.
+[sha256]
+android-arm64 = "01b91dae81d7e94ce55691376838d8b10453d33d7433ddd1b59bf4a9669012b9"
+android-armv7 = "f1b846d2fca91d80d7cc6b4d0deca72c2af993e5fa54eb5a467f5a07a38a7efa"
+android-riscv64 = "c611651a0a4de08d301391a3d08ad334f9585ac29073d891aab224286b8c22d6"
+ios-arm64 = "134739c1e867a5927374baa68d2ac0621ac293be9b7fab8379d94a70904a7966"
+ios-sim-arm64 = "ea0f3263035fb7183b545d4added7027e00fd0d94abeb1f7b786065ce9052281"
+linux-arm64 = "365affa5087be1119f7631f2c83f7e7fe437903d719e1f4c976a08473346b48c"
+linux-armv7 = "50d437bbe6d0b4d9c244661b448dae43b5d57cfd0041c5d7ec9ade42e7e08a5c"
+linux-mipsel = "9b13bfc644eee2712f62de53b458be0bb93a5c7eedcc574c1a64812ebb77e4d4"
+linux-riscv64 = "c17e1f7811fd223e8e6c6d8206af34655b76173abe4f4028592bc68e41a64dbe"
+linux-x86_64 = "913f3d71f1eae9dc7734700380689ba8872a092da92fffd56ed6cf4308ffb038"
+macos-arm64 = "f611ff8be89764be29bba251a97cba1b15382658e1739d35f873b587fda5554d"
+tvos-arm64 = "13dbc117e389ff95ce0a8b20882b2e9febb59687f050b0c9a7d2aa205f0d9ff2"
+watchos-arm64 = "55b4b868694625ed145496cb2b1a7cd6b5c6462382972e336bfd9f687b1ca055"
+windows-arm64 = "43a14898942f9b526c0514c2f4dd1aa6200b4af9c5cdee682633c15cee502a5e"
+windows-x86_64 = "1c667e54b46944e971fd74445fc735b3e8b0710c265deed7713e003e781a7862"

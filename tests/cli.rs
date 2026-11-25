@@ -2,9 +2,31 @@
 //! and stderr for mode selection, invalid arguments, empty stdin, and model-loading failures.
 
 use std::{
+    io::Write,
     path::Path,
     process::{Command, Stdio},
 };
+
+#[test]
+fn cactus_worker_mode_reports_protocol_errors_without_starting_the_cli() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_arta"))
+        .args(["--internal-cactus-worker", "needle"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    writeln!(
+        child.stdin.take().unwrap(),
+        r#"{{"operation":"complete","text":"hello","max_tokens":32}}"#
+    )
+    .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
+        serde_json::json!({"status":"error", "message":"Needle worker is not initialized"})
+    );
+}
 
 #[test]
 fn no_arguments_starts_repl_setup() {

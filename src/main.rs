@@ -261,6 +261,12 @@ async fn stdin_message(mut input: impl AsyncBufRead + Unpin + Send + 'static) ->
 /// and runtime errors on stderr.
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
+    if let Some(result) = arta::provider::cactus::worker_mode(std::env::args_os().skip(1)) {
+        return match result {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => report_error(&error),
+        };
+    }
     let config = match config::get() {
         Ok(config) => config,
         Err(error) => return report_error(error),

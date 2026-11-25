@@ -2,6 +2,7 @@
 //! Implementations expose capabilities through trait methods. Callers supply conversation
 //! state on every request.
 
+pub mod cactus;
 pub mod llama_cpp;
 pub mod registry;
 pub mod tool;
