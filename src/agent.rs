@@ -147,7 +147,8 @@ impl Agent {
         .await
     }
 
-    /// Run a context turn and optionally report rendered inputs and provisional reply text.
+    /// Run a context turn with automatic and explicitly selected tools, optionally reporting
+    /// rendered inputs and provisional reply text.
     pub async fn chat_with_context_and_observers(
         &self,
         history: &[Turn],
@@ -157,7 +158,7 @@ impl Agent {
         observers: TurnObservers,
     ) -> Result<Message> {
         let system_prompt = self.system_prompt_with(instructions);
-        let mut selected = Tools::default();
+        let mut selected = self.tools.selected(|tool| tool.omit_if_unsupported());
         for tool in tools {
             selected.register(tool)?;
         }

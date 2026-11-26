@@ -1,6 +1,7 @@
 //! Structural validation of the workflow tree uses a shared ID set at every depth. This makes
 //! node IDs suitable keys for conversation histories.
 
+use crate::provider::image::ImageOptions;
 use anyhow::{Result, ensure};
 use serde::Deserialize;
 use std::collections::HashSet;
@@ -16,6 +17,20 @@ pub enum Node {
         id: String,
         /// Filename stem of the Markdown profile in the workflow directory.
         agent: String,
+    },
+    /// Generate a PNG and pass its path to the next node.
+    Image {
+        /// Unique key used for progress events.
+        id: String,
+        /// Image provider, defaulting to stable-diffusion.cpp.
+        provider: Option<String>,
+        /// Model ID, defaulting to the provider's configured default.
+        model: Option<String>,
+        /// Literal prompt. If omitted, use the previous output or the workflow request.
+        prompt: Option<String>,
+        /// Per-generation overrides for the selected model's defaults.
+        #[serde(default)]
+        options: ImageOptions,
     },
     /// Repeat an ordered nonempty sequence until its deciding agent calls the break tool.
     Loop {
@@ -37,13 +52,34 @@ impl Node {
         ensure!(!nodes.is_empty(), "a workflow or loop must contain nodes");
         for node in nodes {
             let id = match node {
-                Self::Agent { id, .. } | Self::Loop { id, .. } => id,
+                Self::Agent { id, .. } | Self::Image { id, .. } | Self::Loop { id, .. } => id,
             };
             ensure!(!id.trim().is_empty(), "node id cannot be empty");
             ensure!(ids.insert(id), "duplicate node id '{id}'");
             match node {
                 Self::Agent { agent, .. } => visit(id, agent)?,
-                Self::Loop { nodes, .. } => Self::visit_sequence(nodes, ids, visit)?,
+                Self::Image {
+                    provider,
+                    model,
+                    prompt,
+                    ..
+                } => {
+                    for (name, value) in
+                        [("provider", provider), ("model", model), ("prompt", prompt)]
+                    {
+                        ensure!(
+                            value.as_ref().is_none_or(|text| !text.trim().is_empty()),
+                            "image node '{id}' {name} cannot be empty"
+                        );
+                    }
+                }
+                Self::Loop { nodes, .. } => {
+                    ensure!(
+                        !matches!(nodes.last(), Some(Self::Image { .. })),
+                        "loop '{id}' must end with an agent or a loop that ends with an agent"
+                    );
+                    Self::visit_sequence(nodes, ids, visit)?;
+                }
             }
         }
         Ok(())

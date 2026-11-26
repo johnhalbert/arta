@@ -56,6 +56,11 @@ pub trait Tool: Send + Sync {
     /// Borrow the specification used for registration and prompt rendering.
     fn spec(&self) -> &ToolSpec;
 
+    /// Allow an automatically advertised tool to be omitted for text-only models.
+    fn omit_if_unsupported(&self) -> bool {
+        false
+    }
+
     /// Finish the turn with this tool's output when the call succeeds.
     fn finishes_turn(&self) -> bool {
         false
@@ -74,6 +79,21 @@ pub(crate) struct Tools {
 }
 
 impl Tools {
+    pub(crate) fn has_optional(&self) -> bool {
+        self.entries.values().any(|tool| tool.omit_if_unsupported())
+    }
+
+    pub(crate) fn selected(&self, keep: impl Fn(&dyn Tool) -> bool) -> Self {
+        Self {
+            entries: self
+                .entries
+                .iter()
+                .filter(|(_, tool)| keep(tool.as_ref()))
+                .map(|(name, tool)| (name.clone(), Arc::clone(tool)))
+                .collect(),
+        }
+    }
+
     /// Check whether the caller can take the plain-inference path without requesting an
     /// adapter.
     pub(crate) fn is_empty(&self) -> bool {

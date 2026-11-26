@@ -362,6 +362,19 @@ impl<'a> Tui<'a> {
                 workflow.node(&id, loops);
                 self.model_inputs = ModelInputs::default();
             }
+            WorkflowEvent::ImageStarted {
+                id,
+                provider,
+                model,
+                loops,
+            } => {
+                transcript.node(super::workflow_output::image_node_label(
+                    &id, &provider, &model, &loops,
+                ));
+                workflow.node(&id, loops);
+                workflow.model = Some(format!("Image model {provider}/{model}"));
+                self.model_inputs = ModelInputs::default();
+            }
             WorkflowEvent::ModelLoading { previous, next } => {
                 let status = match previous {
                     Some(previous) if previous == next => "Reloading",

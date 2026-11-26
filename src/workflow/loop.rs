@@ -48,6 +48,7 @@ fn final_agent(node: &Node) -> (&str, &str) {
         Node::Loop { nodes, .. } => {
             final_agent(nodes.last().expect("validated loop cannot be empty"))
         }
+        Node::Image { .. } => unreachable!("validated loops must end with an agent"),
     }
 }
 

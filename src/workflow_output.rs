@@ -27,6 +27,15 @@ pub(super) async fn write(
                 let label = node_label(&id, &agent, &loops);
                 write_progress(progress, &format!("[{label}]")).await?;
             }
+            Ok(WorkflowEvent::ImageStarted {
+                id,
+                provider,
+                model,
+                loops,
+            }) => {
+                let label = image_node_label(&id, &provider, &model, &loops);
+                write_progress(progress, &format!("[{label}]")).await?;
+            }
             Ok(WorkflowEvent::ModelLoading { previous, next }) => {
                 let message = WorkflowEvent::model_loading_message(previous.as_deref(), &next);
                 write_progress(progress, &message).await?;
@@ -114,4 +123,13 @@ pub(super) fn node_label(id: &str, agent: &str, loops: &[LoopIteration]) -> Stri
         let _ = write!(label, " · {} iteration {}", iteration.id, iteration.number);
     }
     label
+}
+
+pub(super) fn image_node_label(
+    id: &str,
+    provider: &str,
+    model: &str,
+    loops: &[LoopIteration],
+) -> String {
+    node_label(id, &format!("image · {provider}/{model}"), loops)
 }

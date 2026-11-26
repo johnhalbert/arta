@@ -171,6 +171,13 @@ pub(crate) async fn chat_recorded(
     past_exchanges: &[Vec<ToolExchange>],
     observers: TurnObservers,
 ) -> Result<(Message, Vec<ToolExchange>)> {
+    let selected;
+    let tools = if tools.has_optional() && !provider.supports_model_tools(request.model_id)? {
+        selected = tools.selected(|tool| !tool.omit_if_unsupported());
+        &selected
+    } else {
+        tools
+    };
     if tools.is_empty() {
         let reply = provider
             .chat_observed(

@@ -130,6 +130,17 @@ path = "gguf/Qwen3.5-4B-Q4_0.gguf"
 # triggers = { weather__lookup = ['\bweather\b'] } # Optional patterns by Arta tool name.
 # extraction_schema = "schemas/contact.json" # Optional JSON schema for prompts without tools.
 
+# [providers."stable-diffusion.cpp"]
+# library_path = "runtime/stable-diffusion.dll" # Optional override for the library beside arta.
+# output_dir = "images"
+# default_model = "sdxl" # Omit to use the first configured checkpoint.
+#
+# [[providers."stable-diffusion.cpp".models]]
+# id = "sdxl"
+# path = "models/sd_xl_base_1.0.safetensors"
+# vae = "models/sdxl_vae.safetensors" # Optional override.
+# options = { width = 1024, height = 1024, steps = 25 }
+
 # [mcp.servers.local]
 # command = "path/to/mcp-server"
 # args = []

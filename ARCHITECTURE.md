@@ -551,6 +551,8 @@ flowchart TB
 
 Cargo patches `llama-cpp-4` to the vendored 0.11.0 source and enables its dynamic-link feature. `llama-cpp-sys-4` supplies the native bindings at the locked version. The root crate enables CUDA by default and forwards the optional HIP and Vulkan features. A CPU-only build disables default features. Runtime `devices`, `gpu_layers`, and split settings select placement among available backends. The native shared libraries are part of the executable's runtime environment. [Root manifest](Cargo.toml) · [Locked dependencies](Cargo.lock) · [Vendored manifest](vendor/llama-cpp-4/Cargo.toml) · [Build instructions](README.md#build-and-run-on-windows)
 
+Arta's build script compiles the pinned stable-diffusion.cpp source with its own statically linked GGML and stages the resulting shared library in the active Cargo target profile. It uses the same Cargo backend features as llama.cpp. The image provider loads the staged library on first use and keeps the native model context on its inference thread. [Build script](build.rs) · [CMake source pins](native/stable-diffusion/CMakeLists.txt) · [Image provider](src/provider/stable_diffusion_cpp.rs)
+
 | Boundary | Where to continue |
 | --- | --- |
 | Initialize backend, resolve placement and load decoder weights | [Backend guard](vendor/llama-cpp-4/src/llama_backend.rs) · [Model and vocabulary](vendor/llama-cpp-4/src/model.rs) · [Model parameters](vendor/llama-cpp-4/src/model/params.rs) · [Placement and pointer lifetimes](vendor/llama-cpp-4/src/model/params/placement.rs) · [Metadata overrides](vendor/llama-cpp-4/src/model/params/kv_overrides.rs) |

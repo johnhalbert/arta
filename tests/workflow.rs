@@ -9,6 +9,9 @@ use arta::{
     model::Model,
     provider::{
         PromptObserver, Provider,
+        image::{ImageGenerator, ImageOptions},
+        registry::ProviderRegistry,
+        stable_diffusion_cpp::StableDiffusionCpp,
         tool::{ToolAdapter, ToolCall, ToolExchange, ToolRequest, ToolResponse},
     },
     stream::Message,
@@ -152,12 +155,43 @@ impl Provider for TestProvider {
         self.model(target)
     }
 
+    fn image_generator(self: Arc<Self>) -> Option<Arc<dyn ImageGenerator>> {
+        Some(self)
+    }
+
     fn send<'a>(&'a self, _: &'a str, _: &'a str) -> BoxFuture<'a, Result<Message>> {
         unreachable!("the test registers a tool for every turn")
     }
 
     fn tool_adapter(&self) -> Option<&dyn ToolAdapter> {
         Some(self)
+    }
+}
+
+impl ImageGenerator for TestProvider {
+    fn default_model(&self) -> Option<&str> {
+        Some("draft")
+    }
+
+    fn model_ids(&self) -> Vec<&str> {
+        vec!["draft", "final"]
+    }
+
+    fn generate<'a>(
+        &'a self,
+        model: &'a str,
+        prompt: &'a str,
+        options: &'a ImageOptions,
+    ) -> BoxFuture<'a, Result<PathBuf>> {
+        Box::pin(async move {
+            let mut runtime = self.0.lock().unwrap();
+            let loaded = runtime.loaded.as_ref().map(|model| model.id().to_owned());
+            runtime.events.push(format!(
+                "render {model} {prompt} {:?} {loaded:?}",
+                options.seed
+            ));
+            Ok(std::path::absolute(format!("{model}.png"))?)
+        })
     }
 }
 
@@ -215,15 +249,34 @@ impl ToolAdapter for TestProvider {
             if let Some(("continue", value)) = remembered {
                 assert_eq!(value, "fix requested");
             }
-            if step.input_end == "Build it" && !request.exchanges.is_empty() {
-                assert_eq!(request.exchanges[0].calls[0].1.content, "saved detail");
+            if step.input_end == "Build it"
+                && let Some(exchange) = request.exchanges.first()
+            {
+                let (call, output) = &exchange.calls[0];
+                if call.name == "generate_image" {
+                    assert!(!output.is_error);
+                    assert_eq!(output.content["model"], "draft");
+                    assert!(
+                        output.content["path"]
+                            .as_str()
+                            .unwrap()
+                            .ends_with("draft.png")
+                    );
+                } else {
+                    assert_eq!(output.content, "saved detail");
+                }
             }
             Ok(match step.answer {
                 Answer::Text(text) => ToolResponse::Reply(text.into()),
                 Answer::Call(name, message) => {
                     let mut arguments = ToolArguments::new();
                     if !message.is_empty() {
-                        arguments.insert("message".into(), Value::from(message));
+                        let key = if name == "generate_image" {
+                            "prompt"
+                        } else {
+                            "message"
+                        };
+                        arguments.insert(key.into(), Value::from(message));
                     }
                     let mut calls = vec![ToolCall {
                         id: "1".into(),
@@ -399,6 +452,7 @@ async fn keeps_per_node_context_and_releases_models_before_switching() -> Result
             }
             WorkflowEvent::NodeFinished => finished += 1,
             WorkflowEvent::ModelLoaded { .. } => {}
+            WorkflowEvent::ImageStarted { .. } => panic!("unexpected image node"),
         }
     }
     assert_eq!(
@@ -493,5 +547,78 @@ async fn missing_loop_decision_stops_the_run_and_releases_the_model() -> Result<
         format!("{error:#}").contains("requires the final agent to call 'continue' or 'break'")
     );
     assert_eq!(runtime.lock().unwrap().events, ["load qa", "unload qa"]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn image_tool_and_workflow_node_use_the_registered_backend() -> Result<()> {
+    let fixture = Fixture::new(
+        "\
+id: illustration
+nodes:
+  - { id: sketch, type: agent, agent: developer }
+  - id: render
+    type: image
+    model: final
+    options: { seed: 42 }
+  - { id: review, type: agent, agent: tester }
+",
+    )?;
+    let mut harness = Harness::with_registry(&fixture.config()?, &ProviderRegistry::default())?;
+    let runtime = Arc::new(Mutex::new(Runtime {
+        steps: [
+            Step {
+                model: "code",
+                instructions: "developer",
+                input_end: "Build it",
+                history: &[],
+                tools: &["generate_image"],
+                remembered_tool: None,
+                answer: Answer::Call("generate_image", "rough sketch"),
+            },
+            Step {
+                model: "code",
+                instructions: "developer",
+                input_end: "Build it",
+                history: &[],
+                tools: &["generate_image"],
+                remembered_tool: None,
+                answer: Answer::Text("a tower in mist"),
+            },
+            Step {
+                model: "qa",
+                instructions: "tester",
+                input_end: "final.png",
+                history: &[],
+                tools: &["generate_image"],
+                remembered_tool: None,
+                answer: Answer::Text("illustration received"),
+            },
+        ]
+        .into(),
+        ..Runtime::default()
+    }));
+    for id in ["fake", StableDiffusionCpp::ID] {
+        harness.register_provider(id, || Ok(Arc::new(TestProvider(runtime.clone()))))?;
+    }
+    assert_eq!(
+        harness
+            .run_workflow("code-writing-loop", "Build it")
+            .await?,
+        "illustration received"
+    );
+    let runtime = runtime.lock().unwrap();
+    assert!(runtime.steps.is_empty());
+    assert_eq!(
+        runtime.events,
+        [
+            "load code",
+            "render draft rough sketch None Some(\"code\")",
+            "unload code",
+            "render final a tower in mist Some(42) None",
+            "load qa",
+            "unload qa",
+        ]
+    );
     Ok(())
 }

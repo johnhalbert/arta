@@ -2,6 +2,7 @@
 //! and stderr for mode selection, invalid arguments, empty stdin, and model-loading failures.
 
 use std::{
+    fs,
     io::Write,
     path::Path,
     process::{Command, Stdio},
@@ -88,4 +89,44 @@ fn missing_model_reports_an_error_without_panicking() {
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
     assert!(String::from_utf8_lossy(&output.stderr).contains("cannot access model"));
+}
+
+#[test]
+fn image_workflow_loads_the_library_staged_by_cargo() -> anyhow::Result<()> {
+    let fixture = tempfile::tempdir()?;
+    let workflow = fixture.path().join("workflows/render");
+    fs::create_dir_all(&workflow)?;
+    fs::write(
+        workflow.join("workflow.yaml"),
+        "id: render\nnodes:\n  - { id: first, type: image }\n",
+    )?;
+    fs::write(
+        fixture.path().join("config.toml"),
+        r#"
+[workflows]
+path = "workflows"
+[[providers."stable-diffusion.cpp".models]]
+id = "image-model"
+path = "missing.safetensors"
+"#,
+    )?;
+    let output = Command::new(env!("CARGO_BIN_EXE_arta"))
+        .current_dir(fixture.path())
+        .args([
+            "--config",
+            "config.toml",
+            "--workflow",
+            "render",
+            "--prompt",
+            "A tree",
+        ])
+        .output()?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(output.stdout.is_empty());
+    assert!(
+        stderr.contains("image model file") && stderr.contains("missing.safetensors"),
+        "{stderr}"
+    );
+    Ok(())
 }

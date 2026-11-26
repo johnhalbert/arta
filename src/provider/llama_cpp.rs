@@ -211,6 +211,16 @@ impl Provider for LlamaCPP {
         Some(self)
     }
 
+    fn supports_model_tools(&self, model_id: &str) -> Result<bool> {
+        if matches!(self.chat.tool_choice, Some(ChatToolChoice::None))
+            || self.chat.use_jinja == Some(false)
+        {
+            return Ok(false);
+        }
+        let model = self.load_model(model_id, None)?;
+        Ok(model.tool_template().is_ok())
+    }
+
     fn chat<'a>(
         &'a self,
         model_id: &'a str,

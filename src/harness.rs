@@ -7,7 +7,13 @@ use crate::{
     config::Config,
     mcp::McpTools,
     model::{Model, ModelId},
-    provider::{Provider, registry::ProviderRegistry, tool},
+    provider::{
+        Provider,
+        image::{GenerateImage, ImageGenerator},
+        registry::ProviderRegistry,
+        stable_diffusion_cpp::StableDiffusionCpp,
+        tool,
+    },
     session::Session,
     tool::{Tool, Tools},
     workflow::Workflow,
@@ -75,7 +81,14 @@ impl Harness {
         );
         match self.providers.entry(provider_id.to_owned()) {
             Entry::Vacant(entry) => {
-                entry.insert(create()?);
+                let provider = create()?;
+                if provider_id == StableDiffusionCpp::ID
+                    && let Some(generator) = Arc::clone(&provider).image_generator()
+                    && let Some(tool) = GenerateImage::new(generator)
+                {
+                    Arc::make_mut(&mut self.tools).register(Arc::new(tool))?;
+                }
+                entry.insert(provider);
                 Ok(())
             }
             Entry::Occupied(_) => bail!("provider '{provider_id}' is already registered"),
@@ -92,6 +105,13 @@ impl Harness {
     /// Borrow a registered provider by its registry ID.
     pub fn provider(&self, provider_id: &str) -> Result<&dyn Provider> {
         Ok(self.provider_handle(provider_id)?.as_ref())
+    }
+
+    /// Resolve a provider's image generation capability by its registry ID.
+    pub fn image_generator(&self, provider_id: &str) -> Result<Arc<dyn ImageGenerator>> {
+        Arc::clone(self.provider_handle(provider_id)?)
+            .image_generator()
+            .with_context(|| format!("provider '{provider_id}' does not support image generation"))
     }
 
     /// Get a shared handle for a model from a registered provider.

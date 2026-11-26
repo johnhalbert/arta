@@ -1,12 +1,12 @@
 # arta
 
-`arta` runs one-shot prompts, interactive conversations, and workflows with local models. It supports GGUF models through llama.cpp and Needle 3 through Cactus Compute.
+`arta` runs one-shot prompts, interactive conversations, and workflows with local models. It supports GGUF models through llama.cpp, Needle 3 through Cactus Compute, and image generation through stable-diffusion.cpp.
 
 For a guided tour of the code, follow a request from startup through model loading, tool calls, workflow execution, and terminal output in the [architecture guide](ARCHITECTURE.md#reading-paths).
 
 ## Build and run on Windows
 
-To build `arta`, you need Rust, CMake, a C++ compiler, and LLVM's `libclang`. On Windows, use the Visual Studio C++ Build Tools. The default build enables CUDA and requires the NVIDIA CUDA Toolkit.
+To build `arta`, you need Rust, CMake, a C++ compiler, and LLVM's `libclang`. On Windows, use the Visual Studio C++ Build Tools. The default build enables CUDA and requires the NVIDIA CUDA Toolkit. Use `--no-default-features` for a CPU build.
 
 1. Build the release executable.
 
@@ -24,7 +24,7 @@ To build `arta`, you need Rust, CMake, a C++ compiler, and LLVM's `libclang`. On
 
 If you move the executable, keep the native libraries from Cargo in the same directory as the executable.
 
-Cargo builds the vendored `llama-cpp-4` 0.11.0 wrapper with ARTA's model-load setters. The native `llama-cpp-sys-4` dependency resolves through `Cargo.lock`.
+Cargo builds the vendored `llama-cpp-4` 0.11.0 wrapper with Arta's model-load setters. It also downloads and verifies the pinned stable-diffusion.cpp sources, builds the native library, and stages `stable-diffusion.dll` next to `arta.exe` in the active target profile. The `cuda`, `hip`, and `vulkan` features select GPU backends for both providers. [Stable-diffusion.cpp source pin](native/stable-diffusion/CMakeLists.txt)
 
 To run `arta` through Cargo, add the same `arta` arguments after `cargo run --release --`.
 
@@ -74,6 +74,25 @@ For structured extraction without visible tools, set `extraction_schema` to a JS
 | `[[providers."llama.cpp".models]]` | GGUF path and shards, GPU placement, tensor validation and buffer overrides, file loading and lazy tensor modes, MTP weight loading, and one GGUF metadata override per model. |
 
 Resolve `template_file` and `additional_shards` relative to `config.toml`. Server, quantization, embedding, and speculative decoding options belong to separate llama.cpp workflows.
+
+### Stable Diffusion image models
+
+Download a single-file checkpoint, such as SD 1.5 or SDXL, and register it in `config.toml`. Arta loads the library built by Cargo from beside the executable on first use. [Pinned upstream release](https://github.com/leejet/stable-diffusion.cpp/releases/tag/master-1133-52491bd)
+
+```toml
+[providers."stable-diffusion.cpp"]
+output_dir = "images"
+default_model = "sdxl"
+
+[[providers."stable-diffusion.cpp".models]]
+id = "sdxl"
+path = "models/sd_xl_base_1.0.safetensors"
+options = { width = 1024, height = 1024, steps = 25 }
+```
+
+Configured paths are relative to `config.toml`. To use a custom build, set `library_path` to a library built with the same C API and with GGML linked into it. Omit `output_dir` to use `images/`, or `default_model` to use the first listed model. A model entry can also set `vae` to a separate VAE file. Arta reuses the current model context across generations until you switch checkpoints. Each PNG goes in a unique subdirectory of `output_dir`.
+
+Keep `[app]` pointed at your language model. With at least one image model configured, models that support tool calls receive `generate_image` automatically in chat, one-shot prompts, and workflow agent steps. The tool takes `prompt` and optional `model` and `options`, then returns the saved PNG path and model ID. `options` can override `width`, `height`, `steps`, `seed`, and `negative_prompt`. Set a nonnegative `seed` for repeatable runs. An omitted seed uses the model default or a random seed.
 
 ## Interactive conversations
 
@@ -157,15 +176,29 @@ nodes:
     agent: pull-request
 ```
 
-Use the same Markdown front matter and system prompt as for standalone agents. The `agent` field matches the filename without `.md`. Agent settings such as `model`, `workspace`, `mcp_servers`, and `config` apply to that agent. The workspace and agent-level model paths are relative to the Markdown file. CLI model flags override the corresponding settings for every node.
+Use the same Markdown front matter and system prompt as for standalone agents. The `agent` field matches the filename without `.md`. Agent settings such as `model`, `workspace`, `mcp_servers`, and `config` apply to that agent. The workspace and agent-level model paths are relative to the Markdown file. CLI model flags override the corresponding settings for agent nodes.
 
 ```powershell
 arta --workflow code-writing-loop --prompt "Implement the requested change and review it."
 ```
 
-Nodes run in order, and each receives the original request and the previous node's reply. Each node ID must be unique in the workflow. A node keeps its own conversation and tool results across iterations. Arta unloads the current model before loading a different model or agent-specific provider configuration.
+Nodes run in order. Agent nodes receive the original request and the previous node's output. Each node ID must be unique in the workflow. An agent node keeps its own conversation and tool results across iterations. Arta unloads the current language model before loading a different model or agent-specific provider configuration.
 
-The final agent in a loop calls `continue` to repeat the loop or `break` to exit it. Set the optional `message` argument to pass feedback or results to the next node. The run reports an error if the agent finishes without making a decision. If the final child is itself a loop, its last agent takes a separate turn to decide whether to repeat the enclosing loop after the inner loop exits.
+Use `type: image` to generate a PNG directly in a workflow. An image-only workflow needs just `workflow.yaml`.
+
+```yaml
+id: illustration
+nodes:
+  - id: render
+    type: image
+    model: sdxl
+    options:
+      seed: 42
+```
+
+The `provider` field defaults to `stable-diffusion.cpp`, and `model` defaults to the provider's configured default. Set `prompt` for a literal prompt. When it is omitted, the image node uses the previous node's nonblank output or falls back to the workflow request. Arta releases the workflow's active language model before image generation. An image node outputs the absolute PNG path for the next node or the workflow's final result.
+
+The final agent in a loop calls `continue` to repeat the loop or `break` to exit it. Set the optional `message` argument to pass feedback or results to the next node. The run reports an error if the agent finishes without making a decision. Place image nodes before the deciding agent. If the final child is itself a loop, its last agent takes a separate turn to decide whether to repeat the enclosing loop after the inner loop exits.
 
 In the terminal UI, enter `/workflow code-writing-loop` to preview the workflow and run it with your next prompt. Enter `/workflow code-writing-loop Implement the change` to select and run it in one step. The upper-left pane highlights the active node and shows the loop iteration and model changes. Use Ctrl+Page Up and Ctrl+Page Down to scroll through longer workflows. The active node's rendered model input stays in the upper-right pane, and each agent's reply appears in the chat. Ordinary chat resumes after the workflow finishes.
 

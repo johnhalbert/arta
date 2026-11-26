@@ -3,8 +3,10 @@
 //! state on every request.
 
 pub mod cactus;
+pub mod image;
 pub mod llama_cpp;
 pub mod registry;
+pub mod stable_diffusion_cpp;
 pub mod tool;
 
 use crate::{config::Config, model::Model, stream::Message};
@@ -61,6 +63,16 @@ pub trait Provider: Send + Sync {
 
     /// Return the adapter for structured tool inference when the implementation supports it.
     fn tool_adapter(&self) -> Option<&dyn tool::ToolAdapter> {
+        None
+    }
+
+    /// Check whether a model can receive automatically advertised tools.
+    fn supports_model_tools(&self, _model_id: &str) -> Result<bool> {
+        Ok(self.tool_adapter().is_some())
+    }
+
+    /// Return the image generation backend when this provider supports that capability.
+    fn image_generator(self: Arc<Self>) -> Option<Arc<dyn image::ImageGenerator>> {
         None
     }
 

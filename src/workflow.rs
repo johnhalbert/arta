@@ -1,4 +1,4 @@
-//! Loads an ordered tree of agent and loop nodes. Each execution owns its model binding,
+//! Loads an ordered tree of agent, image and loop nodes. Each execution owns its model binding,
 //! per-node conversations, and workspace-specific MCP connections. [`Workflow::events`]
 //! drives the same execution as [`Workflow::run`].
 
@@ -14,6 +14,10 @@ use self::{
 use crate::{
     config::{AgentProfile, Config},
     harness::Harness,
+    provider::{
+        image::{self, ImageOptions},
+        stable_diffusion_cpp::StableDiffusionCpp,
+    },
     tool::{Tool, Tools},
 };
 use anyhow::{Context, Result, ensure};
@@ -137,7 +141,7 @@ impl Workflow {
         &self.nodes
     }
 
-    /// Run the workflow with fresh node histories and return the final node's reply.
+    /// Run the workflow with fresh node histories and return the final node's output.
     pub async fn run(&self, harness: &mut Harness, prompt: &str) -> Result<String> {
         self.run_with_progress(harness, prompt, &Progress::default())
             .await
@@ -189,13 +193,7 @@ impl Workflow {
             loops: Vec::new(),
         };
         let result = run.sequence(&self.nodes).await;
-        let cleanup = match run.model.take() {
-            Some(mut model) => tokio::task::spawn_blocking(move || model.unload())
-                .await
-                .context("workflow model unload worker failed")
-                .and_then(|result| result),
-            None => Ok(()),
-        };
+        let cleanup = ActiveModel::release(&mut run.model).await;
         result.with_context(|| format!("workflow '{}' failed", self.id))?;
         cleanup.context("failed to unload the final workflow model")?;
         Ok(run.previous.unwrap_or_default())
@@ -217,7 +215,7 @@ struct Run<'a> {
     model: Option<ActiveModel>,
     /// Unmodified request included in every node's prompt.
     request: &'a str,
-    /// Immediate predecessor's reply across all nodes and loop boundaries.
+    /// Immediate predecessor's output across all nodes and loop boundaries.
     previous: Option<String>,
     /// Optional event sink shared with node agents and model selection.
     progress: &'a Progress,
@@ -237,14 +235,67 @@ impl<'a> Run<'a> {
         })
     }
 
-    /// Dispatch an agent leaf or enter the loop interpreter for a subtree.
+    /// Dispatch a leaf or enter the loop interpreter for a subtree.
     async fn node(&mut self, node: &'a Node) -> Result<()> {
         match node {
             Node::Agent { id, agent } => {
                 self.agent(id, agent, false).await?;
             }
+            Node::Image {
+                id,
+                provider,
+                model,
+                prompt,
+                options,
+            } => {
+                self.image(
+                    id,
+                    provider.as_deref().unwrap_or(StableDiffusionCpp::ID),
+                    model.as_deref(),
+                    prompt.as_deref(),
+                    options,
+                )
+                .await
+                .with_context(|| format!("image node '{id}' failed"))?;
+            }
             Node::Loop { id, nodes } => r#loop::execute(self, id, nodes).await?,
         }
+        Ok(())
+    }
+
+    async fn image(
+        &mut self,
+        id: &str,
+        provider: &str,
+        model: Option<&str>,
+        prompt: Option<&str>,
+        options: &ImageOptions,
+    ) -> Result<()> {
+        let generator = self.harness.image_generator(provider)?;
+        let model = image::model_id(generator.as_ref(), model)?;
+        let prompt = prompt
+            .or_else(|| {
+                self.previous
+                    .as_deref()
+                    .filter(|text| !text.trim().is_empty())
+            })
+            .unwrap_or(self.request);
+        self.progress
+            .emit(|| WorkflowEvent::ImageStarted {
+                id: id.to_owned(),
+                provider: provider.to_owned(),
+                model: model.to_owned(),
+                loops: self.loops.clone(),
+            })
+            .await;
+        ActiveModel::release(&mut self.model).await?;
+        let path = generator.generate(model, prompt, options).await?;
+        let output = path.display().to_string();
+        self.progress
+            .emit(|| WorkflowEvent::Output(output.clone()))
+            .await;
+        self.progress.emit(|| WorkflowEvent::NodeFinished).await;
+        self.previous = Some(output);
         Ok(())
     }
 

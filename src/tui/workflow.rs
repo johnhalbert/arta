@@ -20,7 +20,7 @@ pub(super) struct WorkflowPane {
     rows: Vec<Row>,
     /// Ready before submission, then running, complete, or failed.
     status: &'static str,
-    /// Index of the active agent row, retained when a visit fails.
+    /// Index of the active node row, retained when a visit fails.
     current: Option<usize>,
     /// Iteration path used to annotate active ancestor rows.
     loops: Vec<LoopIteration>,
@@ -32,14 +32,14 @@ pub(super) struct WorkflowPane {
     page: usize,
 }
 
-/// One flattened tree entry retaining indentation and an optional agent profile.
+/// One flattened tree entry retaining indentation and an optional leaf label.
 struct Row {
     /// Definition ID used to locate the row on a node-start event.
     id: String,
     /// Tree depth, rendered as two spaces per enclosing loop.
     indent: usize,
-    /// Profile name for a leaf. Absence identifies a loop heading.
-    agent: Option<String>,
+    /// Agent profile or image node type. Absence identifies a loop heading.
+    leaf: Option<String>,
 }
 
 impl WorkflowPane {
@@ -72,13 +72,18 @@ impl WorkflowPane {
                 Node::Agent { id, agent } => rows.push(Row {
                     id: id.clone(),
                     indent,
-                    agent: Some(agent.clone()),
+                    leaf: Some(agent.clone()),
+                }),
+                Node::Image { id, .. } => rows.push(Row {
+                    id: id.clone(),
+                    indent,
+                    leaf: Some("image".into()),
                 }),
                 Node::Loop { id, nodes } => {
                     rows.push(Row {
                         id: id.clone(),
                         indent,
-                        agent: None,
+                        leaf: None,
                     });
                     Self::append_nodes(rows, nodes, indent + 1);
                 }
@@ -173,7 +178,7 @@ impl WorkflowPane {
                     "  ".repeat(row.indent),
                     clean_terminal_text(&row.id)
                 );
-                match &row.agent {
+                match &row.leaf {
                     Some(agent) if agent != &row.id => {
                         label.push_str(&format!(" ({})", clean_terminal_text(agent)))
                     }

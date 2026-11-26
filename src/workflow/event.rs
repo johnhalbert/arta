@@ -25,6 +25,13 @@ pub enum WorkflowEvent {
         /// Snapshot of the active loop stack from outermost to innermost.
         loops: Vec<LoopIteration>,
     },
+    /// An image node began generation with the selected provider and model.
+    ImageStarted {
+        id: String,
+        provider: String,
+        model: String,
+        loops: Vec<LoopIteration>,
+    },
     /// A new binding is needed, including when settings change for the same model ID.
     ModelLoading {
         /// Previous provider/model label, absent on first load.
@@ -50,9 +57,9 @@ pub enum WorkflowEvent {
         /// Reason this control call was rejected, when present.
         error: Option<String>,
     },
-    /// Chunk of the node's reply. Concatenate in event order.
+    /// Chunk of the node's reply or the path to a generated image.
     Output(String),
-    /// The agent visit completed successfully, including any required decision.
+    /// The node visit completed successfully, including any required decision.
     NodeFinished,
 }
 

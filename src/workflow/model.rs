@@ -145,9 +145,19 @@ impl ActiveModel {
         )
     }
 
+    /// Release the current language model off the async executor.
+    pub(super) async fn release(active: &mut Option<Self>) -> Result<()> {
+        if let Some(mut model) = active.take() {
+            tokio::task::spawn_blocking(move || model.unload())
+                .await
+                .context("workflow model unload worker failed")??;
+        }
+        Ok(())
+    }
+
     /// Take the binding before releasing it, so explicit cleanup and the drop fallback can
     /// both call this method.
-    pub(super) fn unload(&mut self) -> Result<()> {
+    fn unload(&mut self) -> Result<()> {
         if let Some(binding) = self.binding.take() {
             drop(binding.model);
             self.provider.unload_model(&binding.id)?;
