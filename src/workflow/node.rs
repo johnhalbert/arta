@@ -1,7 +1,7 @@
 //! Structural validation of the workflow tree uses a shared ID set at every depth. This makes
 //! node IDs suitable keys for conversation histories.
 
-use crate::provider::image::ImageOptions;
+use crate::provider::{audio::AudioOptions, image::ImageOptions};
 use anyhow::{Result, ensure};
 use serde::Deserialize;
 use std::collections::HashSet;
@@ -32,6 +32,20 @@ pub enum Node {
         #[serde(default)]
         options: ImageOptions,
     },
+    /// Generate a WAV and pass its path to the next node.
+    Audio {
+        /// Unique key used for progress events.
+        id: String,
+        /// Audio provider, defaulting to audio.cpp.
+        provider: Option<String>,
+        /// Model ID, defaulting to the provider's configured default.
+        model: Option<String>,
+        /// Literal prompt. If omitted, use the previous output or the workflow request.
+        prompt: Option<String>,
+        /// Per-generation overrides for the selected model's defaults.
+        #[serde(default)]
+        options: AudioOptions,
+    },
     /// Repeat an ordered nonempty sequence until its deciding agent calls the break tool.
     Loop {
         /// Unique key identifying the loop in iteration paths and control calls.
@@ -52,7 +66,10 @@ impl Node {
         ensure!(!nodes.is_empty(), "a workflow or loop must contain nodes");
         for node in nodes {
             let id = match node {
-                Self::Agent { id, .. } | Self::Image { id, .. } | Self::Loop { id, .. } => id,
+                Self::Agent { id, .. }
+                | Self::Image { id, .. }
+                | Self::Audio { id, .. }
+                | Self::Loop { id, .. } => id,
             };
             ensure!(!id.trim().is_empty(), "node id cannot be empty");
             ensure!(ids.insert(id), "duplicate node id '{id}'");
@@ -63,19 +80,30 @@ impl Node {
                     model,
                     prompt,
                     ..
+                }
+                | Self::Audio {
+                    provider,
+                    model,
+                    prompt,
+                    ..
                 } => {
+                    let kind = if matches!(node, Self::Image { .. }) {
+                        "image"
+                    } else {
+                        "audio"
+                    };
                     for (name, value) in
                         [("provider", provider), ("model", model), ("prompt", prompt)]
                     {
                         ensure!(
                             value.as_ref().is_none_or(|text| !text.trim().is_empty()),
-                            "image node '{id}' {name} cannot be empty"
+                            "{kind} node '{id}' {name} cannot be empty"
                         );
                     }
                 }
                 Self::Loop { nodes, .. } => {
                     ensure!(
-                        !matches!(nodes.last(), Some(Self::Image { .. })),
+                        !matches!(nodes.last(), Some(Self::Image { .. } | Self::Audio { .. })),
                         "loop '{id}' must end with an agent or a loop that ends with an agent"
                     );
                     Self::visit_sequence(nodes, ids, visit)?;

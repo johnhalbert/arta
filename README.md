@@ -1,12 +1,12 @@
 # arta
 
-`arta` runs one-shot prompts, interactive conversations, and workflows with local models. It supports GGUF models through llama.cpp, Needle 3 through Cactus Compute, and image generation through stable-diffusion.cpp.
+`arta` runs one-shot prompts, interactive conversations, and workflows with local models. It supports GGUF language models through llama.cpp, Needle 3 through Cactus Compute, image generation through stable-diffusion.cpp, and audio generation through audio.cpp.
 
 For a guided tour of the code, follow a request from startup through model loading, tool calls, workflow execution, and terminal output in the [architecture guide](ARCHITECTURE.md#reading-paths).
 
 ## Build and run on Windows
 
-To build `arta`, you need Rust, CMake, a C++ compiler, and LLVM's `libclang`. On Windows, use the Visual Studio C++ Build Tools. The default build enables CUDA and requires the NVIDIA CUDA Toolkit. Use `--no-default-features` for a CPU build.
+To build `arta`, you need Rust, CMake 3.20 or newer, a C++ compiler, and LLVM's `libclang`. On Windows, use the Visual Studio C++ Build Tools. The default build enables CUDA and requires CUDA Toolkit 12.0 or newer. Use `--no-default-features` for a CPU build.
 
 1. Build the release executable.
 
@@ -24,7 +24,7 @@ To build `arta`, you need Rust, CMake, a C++ compiler, and LLVM's `libclang`. On
 
 If you move the executable, keep the native libraries from Cargo in the same directory as the executable.
 
-Cargo builds the vendored `llama-cpp-4` 0.11.0 wrapper with Arta's model-load setters. It also downloads and verifies the pinned stable-diffusion.cpp sources, builds the native library, and stages `stable-diffusion.dll` next to `arta.exe` in the active target profile. The `cuda`, `hip`, and `vulkan` features select GPU backends for both providers. [Stable-diffusion.cpp source pin](native/stable-diffusion/CMakeLists.txt)
+Cargo builds the vendored `llama-cpp-4` 0.11.0 wrapper with Arta's model-load setters. It also downloads and verifies the pinned stable-diffusion.cpp and audio.cpp sources, builds their shared libraries, and stages them beside the executable in the active target profile. On Windows these are `stable-diffusion.dll` and `audiocpp.dll`. The `cuda`, `hip`, and `vulkan` features select GPU backends for all three providers. [Stable-diffusion.cpp source pin](native/stable-diffusion/CMakeLists.txt) · [audio.cpp source pin](native/audio/CMakeLists.txt)
 
 To run `arta` through Cargo, add the same `arta` arguments after `cargo run --release --`.
 
@@ -93,6 +93,26 @@ options = { width = 1024, height = 1024, steps = 25 }
 Configured paths are relative to `config.toml`. To use a custom build, set `library_path` to a library built with the same C API and with GGML linked into it. Omit `output_dir` to use `images/`, or `default_model` to use the first listed model. A model entry can also set `vae` to a separate VAE file. Arta reuses the current model context across generations until you switch checkpoints. Each PNG goes in a unique subdirectory of `output_dir`.
 
 Keep `[app]` pointed at your language model. With at least one image model configured, models that support tool calls receive `generate_image` automatically in chat, one-shot prompts, and workflow agent steps. The tool takes `prompt` and optional `model` and `options`, then returns the saved PNG path and model ID. `options` can override `width`, `height`, `steps`, `seed`, and `negative_prompt`. Set a nonnegative `seed` for repeatable runs. An omitted seed uses the model default or a random seed.
+
+### Local audio models
+
+Download a compatible audio.cpp model file or package and register it in `config.toml`. Use `task = "tts"` for speech or `task = "gen"` for music and sound effects. The `family` hint identifies the upstream model family when the package cannot be identified from its path. [audio.cpp model catalog](https://github.com/0xShug0/audio.cpp/tree/dd1ad8bd88497eeb50999d1237c1e19e9d5a2133/model_specs)
+
+```toml
+[providers."audio.cpp"]
+output_dir = "audio"
+
+[[providers."audio.cpp".models]]
+id = "narrator"
+path = "models/Supertonic-3-GGUF/supertonic-3-q8_0.gguf"
+family = "supertonic"
+task = "tts"
+options = { voice_id = "F1", language = "en" }
+```
+
+Paths are relative to `config.toml`. The provider defaults to the first listed model and saves each WAV to a unique subdirectory of `audio/`. Use `default_model`, `output_dir`, `backend`, or `threads` to override those settings. The backend defaults to the GPU backend selected at build time or CPU in a CPU build. `library_path` can point to a compatible custom audio.cpp shared library.
+
+Keep `[app]` pointed at your language model. With an audio model configured, agents whose language models support tools receive `generate_audio` automatically. The tool takes `prompt` and optional `model` and `options`, and returns the saved WAV path and model ID. Options use the selected audio.cpp model's request keys and string values. For example, `voice_id = "F1"` selects a Supertonic voice and `duration_sec = "5"` requests five seconds from Stable Audio. A tool call or workflow node can override a model's options by key.
 
 ## Interactive conversations
 
@@ -198,7 +218,21 @@ nodes:
 
 The `provider` field defaults to `stable-diffusion.cpp`, and `model` defaults to the provider's configured default. Set `prompt` for a literal prompt. When it is omitted, the image node uses the previous node's nonblank output or falls back to the workflow request. Arta releases the workflow's active language model before image generation. An image node outputs the absolute PNG path for the next node or the workflow's final result.
 
-The final agent in a loop calls `continue` to repeat the loop or `break` to exit it. Set the optional `message` argument to pass feedback or results to the next node. The run reports an error if the agent finishes without making a decision. Place image nodes before the deciding agent. If the final child is itself a loop, its last agent takes a separate turn to decide whether to repeat the enclosing loop after the inner loop exits.
+Use `type: audio` to generate a WAV directly. A workflow can consist of just this node.
+
+```yaml
+id: narrate
+nodes:
+  - id: read-intro
+    type: audio
+    model: narrator
+    prompt: "Welcome to the show."
+    options: { voice_id: "F2" }
+```
+
+The `provider` field defaults to `audio.cpp`. If `prompt` is omitted, the node uses the previous node's nonblank output or the workflow request. Arta releases the active workflow language model before generation and passes the absolute WAV path to the next node or returns it as the workflow result.
+
+The final agent in a loop calls `continue` to repeat the loop or `break` to exit it. Set the optional `message` argument to pass feedback or results to the next node. The run reports an error if the agent finishes without making a decision. Place image and audio nodes before the deciding agent. If the final child is itself a loop, its last agent takes a separate turn to decide whether to repeat the enclosing loop after the inner loop exits.
 
 In the terminal UI, enter `/workflow code-writing-loop` to preview the workflow and run it with your next prompt. Enter `/workflow code-writing-loop Implement the change` to select and run it in one step. The upper-left pane highlights the active node and shows the loop iteration and model changes. Use Ctrl+Page Up and Ctrl+Page Down to scroll through longer workflows. The active node's rendered model input stays in the upper-right pane, and each agent's reply appears in the chat. Ordinary chat resumes after the workflow finishes.
 

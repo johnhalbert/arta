@@ -1,4 +1,4 @@
-//! Loads an ordered tree of agent, image and loop nodes. Each execution owns its model binding,
+//! Loads an ordered tree of agent, image, audio and loop nodes. Each execution owns its model binding,
 //! per-node conversations, and workspace-specific MCP connections. [`Workflow::events`]
 //! drives the same execution as [`Workflow::run`].
 
@@ -15,6 +15,8 @@ use crate::{
     config::{AgentProfile, Config},
     harness::Harness,
     provider::{
+        audio::{self, AudioOptions},
+        audio_cpp::AudioCpp,
         image::{self, ImageOptions},
         stable_diffusion_cpp::StableDiffusionCpp,
     },
@@ -258,6 +260,23 @@ impl<'a> Run<'a> {
                 .await
                 .with_context(|| format!("image node '{id}' failed"))?;
             }
+            Node::Audio {
+                id,
+                provider,
+                model,
+                prompt,
+                options,
+            } => {
+                self.audio(
+                    id,
+                    provider.as_deref().unwrap_or(AudioCpp::ID),
+                    model.as_deref(),
+                    prompt.as_deref(),
+                    options,
+                )
+                .await
+                .with_context(|| format!("audio node '{id}' failed"))?;
+            }
             Node::Loop { id, nodes } => r#loop::execute(self, id, nodes).await?,
         }
         Ok(())
@@ -273,13 +292,6 @@ impl<'a> Run<'a> {
     ) -> Result<()> {
         let generator = self.harness.image_generator(provider)?;
         let model = image::model_id(generator.as_ref(), model)?;
-        let prompt = prompt
-            .or_else(|| {
-                self.previous
-                    .as_deref()
-                    .filter(|text| !text.trim().is_empty())
-            })
-            .unwrap_or(self.request);
         self.progress
             .emit(|| WorkflowEvent::ImageStarted {
                 id: id.to_owned(),
@@ -289,14 +301,56 @@ impl<'a> Run<'a> {
             })
             .await;
         ActiveModel::release(&mut self.model).await?;
-        let path = generator.generate(model, prompt, options).await?;
+        let path = generator
+            .generate(model, self.artifact_prompt(prompt), options)
+            .await?;
+        self.finish_artifact(path).await;
+        Ok(())
+    }
+
+    async fn audio(
+        &mut self,
+        id: &str,
+        provider: &str,
+        model: Option<&str>,
+        prompt: Option<&str>,
+        options: &AudioOptions,
+    ) -> Result<()> {
+        let generator = self.harness.audio_generator(provider)?;
+        let model = audio::model_id(generator.as_ref(), model)?;
+        self.progress
+            .emit(|| WorkflowEvent::AudioStarted {
+                id: id.to_owned(),
+                provider: provider.to_owned(),
+                model: model.to_owned(),
+                loops: self.loops.clone(),
+            })
+            .await;
+        ActiveModel::release(&mut self.model).await?;
+        let path = generator
+            .generate(model, self.artifact_prompt(prompt), options)
+            .await?;
+        self.finish_artifact(path).await;
+        Ok(())
+    }
+
+    fn artifact_prompt<'b>(&'b self, prompt: Option<&'b str>) -> &'b str {
+        prompt
+            .or_else(|| {
+                self.previous
+                    .as_deref()
+                    .filter(|text| !text.trim().is_empty())
+            })
+            .unwrap_or(self.request)
+    }
+
+    async fn finish_artifact(&mut self, path: PathBuf) {
         let output = path.display().to_string();
         self.progress
             .emit(|| WorkflowEvent::Output(output.clone()))
             .await;
         self.progress.emit(|| WorkflowEvent::NodeFinished).await;
         self.previous = Some(output);
-        Ok(())
     }
 
     /// Attach the node ID and profile name to failures from a visit.

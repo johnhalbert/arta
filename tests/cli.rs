@@ -130,3 +130,48 @@ path = "missing.safetensors"
     );
     Ok(())
 }
+
+#[test]
+fn audio_workflow_loads_the_library_staged_by_cargo() -> anyhow::Result<()> {
+    let fixture = tempfile::tempdir()?;
+    let workflow = fixture.path().join("workflows/narrate");
+    fs::create_dir_all(&workflow)?;
+    fs::write(
+        workflow.join("workflow.yaml"),
+        "id: narrate\nnodes:\n  - { id: first, type: audio }\n",
+    )?;
+    fs::write(
+        fixture.path().join("config.toml"),
+        r#"
+[workflows]
+path = "workflows"
+[[providers."audio.cpp".models]]
+id = "speech"
+path = "missing.gguf"
+"#,
+    )?;
+    let output = Command::new(env!("CARGO_BIN_EXE_arta"))
+        .current_dir(fixture.path())
+        .args([
+            "--config",
+            "config.toml",
+            "--workflow",
+            "narrate",
+            "--prompt",
+            "Hello",
+        ])
+        .output()?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(output.stdout.is_empty());
+    assert!(
+        stderr.contains("[first (audio · audio.cpp/speech)]"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("audio model path") && stderr.contains("missing.gguf"),
+        "{stderr}"
+    );
+    assert!(!fixture.path().join("audio").exists());
+    Ok(())
+}

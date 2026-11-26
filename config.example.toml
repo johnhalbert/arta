@@ -141,6 +141,20 @@ path = "gguf/Qwen3.5-4B-Q4_0.gguf"
 # vae = "models/sdxl_vae.safetensors" # Optional override.
 # options = { width = 1024, height = 1024, steps = 25 }
 
+# [providers."audio.cpp"]
+# library_path = "runtime/audiocpp.dll" # Optional override for the library beside arta.
+# output_dir = "audio"
+# default_model = "narrator" # Omit to use the first configured model.
+# backend = "cpu" # Omit to use the backend selected at build time.
+# threads = 4
+#
+# [[providers."audio.cpp".models]]
+# id = "narrator"
+# path = "models/Supertonic-3-GGUF/supertonic-3-q8_0.gguf"
+# family = "supertonic"
+# task = "tts" # Use "gen" for music and sound effects models.
+# options = { voice_id = "F1", language = "en" }
+
 # [mcp.servers.local]
 # command = "path/to/mcp-server"
 # args = []

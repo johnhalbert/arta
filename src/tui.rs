@@ -368,11 +368,24 @@ impl<'a> Tui<'a> {
                 model,
                 loops,
             } => {
-                transcript.node(super::workflow_output::image_node_label(
-                    &id, &provider, &model, &loops,
+                transcript.node(super::workflow_output::artifact_node_label(
+                    &id, "image", &provider, &model, &loops,
                 ));
                 workflow.node(&id, loops);
                 workflow.model = Some(format!("Image model {provider}/{model}"));
+                self.model_inputs = ModelInputs::default();
+            }
+            WorkflowEvent::AudioStarted {
+                id,
+                provider,
+                model,
+                loops,
+            } => {
+                transcript.node(super::workflow_output::artifact_node_label(
+                    &id, "audio", &provider, &model, &loops,
+                ));
+                workflow.node(&id, loops);
+                workflow.model = Some(format!("Audio model {provider}/{model}"));
                 self.model_inputs = ModelInputs::default();
             }
             WorkflowEvent::ModelLoading { previous, next } => {

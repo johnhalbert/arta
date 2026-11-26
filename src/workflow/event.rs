@@ -32,6 +32,13 @@ pub enum WorkflowEvent {
         model: String,
         loops: Vec<LoopIteration>,
     },
+    /// An audio node began generation with the selected provider and model.
+    AudioStarted {
+        id: String,
+        provider: String,
+        model: String,
+        loops: Vec<LoopIteration>,
+    },
     /// A new binding is needed, including when settings change for the same model ID.
     ModelLoading {
         /// Previous provider/model label, absent on first load.
@@ -57,7 +64,7 @@ pub enum WorkflowEvent {
         /// Reason this control call was rejected, when present.
         error: Option<String>,
     },
-    /// Chunk of the node's reply or the path to a generated image.
+    /// Chunk of the node's reply or the path to a generated artifact.
     Output(String),
     /// The node visit completed successfully, including any required decision.
     NodeFinished,

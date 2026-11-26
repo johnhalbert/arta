@@ -9,6 +9,8 @@ use arta::{
     model::Model,
     provider::{
         PromptObserver, Provider,
+        audio::{AudioGenerator, AudioOptions},
+        audio_cpp::AudioCpp,
         image::{ImageGenerator, ImageOptions},
         registry::ProviderRegistry,
         stable_diffusion_cpp::StableDiffusionCpp,
@@ -159,6 +161,10 @@ impl Provider for TestProvider {
         Some(self)
     }
 
+    fn audio_generator(self: Arc<Self>) -> Option<Arc<dyn AudioGenerator>> {
+        Some(self)
+    }
+
     fn send<'a>(&'a self, _: &'a str, _: &'a str) -> BoxFuture<'a, Result<Message>> {
         unreachable!("the test registers a tool for every turn")
     }
@@ -191,6 +197,33 @@ impl ImageGenerator for TestProvider {
                 options.seed
             ));
             Ok(std::path::absolute(format!("{model}.png"))?)
+        })
+    }
+}
+
+impl AudioGenerator for TestProvider {
+    fn default_model(&self) -> Option<&str> {
+        Some("draft")
+    }
+
+    fn model_ids(&self) -> Vec<&str> {
+        vec!["draft", "final"]
+    }
+
+    fn generate<'a>(
+        &'a self,
+        model: &'a str,
+        prompt: &'a str,
+        options: &'a AudioOptions,
+    ) -> BoxFuture<'a, Result<PathBuf>> {
+        Box::pin(async move {
+            let mut runtime = self.0.lock().unwrap();
+            let loaded = runtime.loaded.as_ref().map(|model| model.id().to_owned());
+            runtime.events.push(format!(
+                "record {model} {prompt} {:?} {loaded:?}",
+                options.get("voice_id")
+            ));
+            Ok(std::path::absolute(format!("{model}.wav"))?)
         })
     }
 }
@@ -253,15 +286,15 @@ impl ToolAdapter for TestProvider {
                 && let Some(exchange) = request.exchanges.first()
             {
                 let (call, output) = &exchange.calls[0];
-                if call.name == "generate_image" {
+                if matches!(call.name.as_str(), "generate_image" | "generate_audio") {
                     assert!(!output.is_error);
                     assert_eq!(output.content["model"], "draft");
-                    assert!(
-                        output.content["path"]
-                            .as_str()
-                            .unwrap()
-                            .ends_with("draft.png")
-                    );
+                    let expected = if call.name == "generate_image" {
+                        "draft.png"
+                    } else {
+                        "draft.wav"
+                    };
+                    assert!(output.content["path"].as_str().unwrap().ends_with(expected));
                 } else {
                     assert_eq!(output.content, "saved detail");
                 }
@@ -271,7 +304,7 @@ impl ToolAdapter for TestProvider {
                 Answer::Call(name, message) => {
                     let mut arguments = ToolArguments::new();
                     if !message.is_empty() {
-                        let key = if name == "generate_image" {
+                        let key = if matches!(name, "generate_image" | "generate_audio") {
                             "prompt"
                         } else {
                             "message"
@@ -453,6 +486,7 @@ async fn keeps_per_node_context_and_releases_models_before_switching() -> Result
             WorkflowEvent::NodeFinished => finished += 1,
             WorkflowEvent::ModelLoaded { .. } => {}
             WorkflowEvent::ImageStarted { .. } => panic!("unexpected image node"),
+            WorkflowEvent::AudioStarted { .. } => panic!("unexpected audio node"),
         }
     }
     assert_eq!(
@@ -616,6 +650,99 @@ nodes:
             "render draft rough sketch None Some(\"code\")",
             "unload code",
             "render final a tower in mist Some(42) None",
+            "load qa",
+            "unload qa",
+        ]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn audio_tool_and_workflow_node_use_the_registered_backend() -> Result<()> {
+    let fixture = Fixture::new(
+        "\
+id: narration
+nodes:
+  - { id: draft, type: agent, agent: developer }
+  - id: record
+    type: audio
+    model: final
+    options: { voice_id: F2 }
+  - { id: review, type: agent, agent: tester }
+",
+    )?;
+    let config = fixture.config()?;
+    let mut harness = Harness::with_registry(&config, &ProviderRegistry::default())?;
+    let runtime = Arc::new(Mutex::new(Runtime {
+        steps: [
+            Step {
+                model: "code",
+                instructions: "developer",
+                input_end: "Build it",
+                history: &[],
+                tools: &["generate_audio"],
+                remembered_tool: None,
+                answer: Answer::Call("generate_audio", "draft narration"),
+            },
+            Step {
+                model: "code",
+                instructions: "developer",
+                input_end: "Build it",
+                history: &[],
+                tools: &["generate_audio"],
+                remembered_tool: None,
+                answer: Answer::Text("final narration"),
+            },
+            Step {
+                model: "qa",
+                instructions: "tester",
+                input_end: "final.wav",
+                history: &[],
+                tools: &["generate_audio"],
+                remembered_tool: None,
+                answer: Answer::Text("narration received"),
+            },
+        ]
+        .into(),
+        ..Runtime::default()
+    }));
+    for id in ["fake", AudioCpp::ID] {
+        harness.register_provider(id, || Ok(Arc::new(TestProvider(runtime.clone()))))?;
+    }
+    let workflow = Workflow::load(&config, "code-writing-loop")?;
+    let mut events = workflow.events(&mut harness, "Build it", false);
+    let mut started = false;
+    let mut final_reply = String::new();
+    while let Some(event) = events.next().await {
+        match event? {
+            WorkflowEvent::AudioStarted {
+                id,
+                provider,
+                model,
+                loops,
+            } => {
+                assert_eq!(
+                    (id.as_str(), provider.as_str(), model.as_str()),
+                    ("record", AudioCpp::ID, "final")
+                );
+                assert!(loops.is_empty());
+                started = true;
+            }
+            WorkflowEvent::Output(text) => final_reply = text,
+            _ => {}
+        }
+    }
+    assert!(started);
+    assert_eq!(final_reply, "narration received");
+    let runtime = runtime.lock().unwrap();
+    assert!(runtime.steps.is_empty());
+    assert_eq!(
+        runtime.events,
+        [
+            "load code",
+            "record draft draft narration None Some(\"code\")",
+            "unload code",
+            "record final final narration Some(\"F2\") None",
             "load qa",
             "unload qa",
         ]

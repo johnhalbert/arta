@@ -9,6 +9,8 @@ use crate::{
     model::{Model, ModelId},
     provider::{
         Provider,
+        audio::{AudioGenerator, GenerateAudio},
+        audio_cpp::AudioCpp,
         image::{GenerateImage, ImageGenerator},
         registry::ProviderRegistry,
         stable_diffusion_cpp::StableDiffusionCpp,
@@ -88,6 +90,12 @@ impl Harness {
                 {
                     Arc::make_mut(&mut self.tools).register(Arc::new(tool))?;
                 }
+                if provider_id == AudioCpp::ID
+                    && let Some(generator) = Arc::clone(&provider).audio_generator()
+                    && let Some(tool) = GenerateAudio::new(generator)
+                {
+                    Arc::make_mut(&mut self.tools).register(Arc::new(tool))?;
+                }
                 entry.insert(provider);
                 Ok(())
             }
@@ -112,6 +120,13 @@ impl Harness {
         Arc::clone(self.provider_handle(provider_id)?)
             .image_generator()
             .with_context(|| format!("provider '{provider_id}' does not support image generation"))
+    }
+
+    /// Resolve a provider's audio generation capability by its registry ID.
+    pub fn audio_generator(&self, provider_id: &str) -> Result<Arc<dyn AudioGenerator>> {
+        Arc::clone(self.provider_handle(provider_id)?)
+            .audio_generator()
+            .with_context(|| format!("provider '{provider_id}' does not support audio generation"))
     }
 
     /// Get a shared handle for a model from a registered provider.

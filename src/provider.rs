@@ -2,9 +2,12 @@
 //! Implementations expose capabilities through trait methods. Callers supply conversation
 //! state on every request.
 
+pub mod audio;
+pub mod audio_cpp;
 pub mod cactus;
 pub mod image;
 pub mod llama_cpp;
+mod native;
 pub mod registry;
 pub mod stable_diffusion_cpp;
 pub mod tool;
@@ -73,6 +76,11 @@ pub trait Provider: Send + Sync {
 
     /// Return the image generation backend when this provider supports that capability.
     fn image_generator(self: Arc<Self>) -> Option<Arc<dyn image::ImageGenerator>> {
+        None
+    }
+
+    /// Return the audio generation backend when this provider supports that capability.
+    fn audio_generator(self: Arc<Self>) -> Option<Arc<dyn audio::AudioGenerator>> {
         None
     }
 

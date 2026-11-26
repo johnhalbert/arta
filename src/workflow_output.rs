@@ -33,7 +33,16 @@ pub(super) async fn write(
                 model,
                 loops,
             }) => {
-                let label = image_node_label(&id, &provider, &model, &loops);
+                let label = artifact_node_label(&id, "image", &provider, &model, &loops);
+                write_progress(progress, &format!("[{label}]")).await?;
+            }
+            Ok(WorkflowEvent::AudioStarted {
+                id,
+                provider,
+                model,
+                loops,
+            }) => {
+                let label = artifact_node_label(&id, "audio", &provider, &model, &loops);
                 write_progress(progress, &format!("[{label}]")).await?;
             }
             Ok(WorkflowEvent::ModelLoading { previous, next }) => {
@@ -125,11 +134,12 @@ pub(super) fn node_label(id: &str, agent: &str, loops: &[LoopIteration]) -> Stri
     label
 }
 
-pub(super) fn image_node_label(
+pub(super) fn artifact_node_label(
     id: &str,
+    kind: &str,
     provider: &str,
     model: &str,
     loops: &[LoopIteration],
 ) -> String {
-    node_label(id, &format!("image · {provider}/{model}"), loops)
+    node_label(id, &format!("{kind} · {provider}/{model}"), loops)
 }

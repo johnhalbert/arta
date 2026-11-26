@@ -2,6 +2,7 @@
 //! One thread owns the library and its context. Native handles never cross threads.
 
 use super::{ImageOptions, StableDiffusionModelConfig};
+use crate::provider::native::load_library;
 use anyhow::{Context, Result, bail, ensure};
 use libloading::Library;
 use std::{
@@ -159,27 +160,6 @@ api! {
     fn sd_tensor_dim(*const SdTensor, usize) -> i64;
     fn sd_tensor_byte_size(*const SdTensor) -> usize;
     fn sd_tensor_data(*const SdTensor) -> *const c_void;
-}
-
-fn load_library(path: &Path) -> Result<Library> {
-    // The configured native library and its dependencies must be trusted by the caller.
-    #[cfg(windows)]
-    {
-        use libloading::os::windows::{
-            LOAD_LIBRARY_SEARCH_DEFAULT_DIRS, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR,
-        };
-        Ok(unsafe {
-            libloading::os::windows::Library::load_with_flags(
-                path,
-                LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS,
-            )
-        }?
-        .into())
-    }
-    #[cfg(not(windows))]
-    {
-        Ok(unsafe { Library::new(path) }?)
-    }
 }
 
 /// An owned C handle. These stay within the runtime's library lifetime.

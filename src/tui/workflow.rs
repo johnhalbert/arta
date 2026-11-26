@@ -38,7 +38,7 @@ struct Row {
     id: String,
     /// Tree depth, rendered as two spaces per enclosing loop.
     indent: usize,
-    /// Agent profile or image node type. Absence identifies a loop heading.
+    /// Agent profile or artifact node type. Absence identifies a loop heading.
     leaf: Option<String>,
 }
 
@@ -78,6 +78,11 @@ impl WorkflowPane {
                     id: id.clone(),
                     indent,
                     leaf: Some("image".into()),
+                }),
+                Node::Audio { id, .. } => rows.push(Row {
+                    id: id.clone(),
+                    indent,
+                    leaf: Some("audio".into()),
                 }),
                 Node::Loop { id, nodes } => {
                     rows.push(Row {

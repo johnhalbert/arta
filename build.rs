@@ -6,35 +6,78 @@ use std::{
 };
 
 fn main() {
-    println!("cargo:rerun-if-changed=native/stable-diffusion/CMakeLists.txt");
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo must set OUT_DIR"));
     let target_os = env::var("CARGO_CFG_TARGET_OS").expect("Cargo must set CARGO_CFG_TARGET_OS");
-    let (install_dir, filename) = match target_os.as_str() {
-        "windows" => ("bin", "stable-diffusion.dll"),
-        "macos" => ("lib", "libstable-diffusion.dylib"),
-        _ => ("lib", "libstable-diffusion.so"),
+    if target_os == "windows" && env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        // audio.cpp's narrow C API paths are UTF-8.
+        let manifest = Path::new("native/windows-utf8.manifest");
+        let path = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap()).join(manifest);
+        println!("cargo:rerun-if-changed={}", manifest.display());
+        println!("cargo:rustc-link-arg-bin=arta=/MANIFEST:EMBED");
+        println!(
+            "cargo:rustc-link-arg-bin=arta=/MANIFESTINPUT:{}",
+            path.display()
+        );
+    }
+    let profile = profile_directory(&out_dir);
+    build_library(
+        &out_dir,
+        &profile,
+        &target_os,
+        "stable-diffusion",
+        "stable-diffusion",
+        ["SD_CUDA", "SD_HIPBLAS", "SD_VULKAN"],
+    );
+    build_library(
+        &out_dir.join("audio"),
+        &profile,
+        &target_os,
+        "audio",
+        "audiocpp",
+        [
+            "ENGINE_ENABLE_CUDA",
+            "ENGINE_ENABLE_HIP",
+            "ENGINE_ENABLE_VULKAN",
+        ],
+    );
+}
+
+fn build_library(
+    out_dir: &Path,
+    profile: &Path,
+    target_os: &str,
+    project: &str,
+    name: &str,
+    features: [&str; 3],
+) {
+    let source = format!("native/{project}");
+    println!("cargo:rerun-if-changed={source}/CMakeLists.txt");
+    let (install_dir, filename) = match target_os {
+        "windows" => ("bin", format!("{name}.dll")),
+        "macos" => ("lib", format!("lib{name}.dylib")),
+        _ => ("lib", format!("lib{name}.so")),
     };
 
-    let mut cmake = cmake::Config::new("native/stable-diffusion");
+    let mut cmake = cmake::Config::new(source);
     cmake
+        .out_dir(out_dir)
         .profile("Release")
         .define("CMAKE_INSTALL_BINDIR", "bin")
         .define("CMAKE_INSTALL_LIBDIR", "lib");
-    for (option, enabled) in [
-        ("SD_CUDA", cfg!(feature = "cuda")),
-        ("SD_HIPBLAS", cfg!(feature = "hip")),
-        ("SD_VULKAN", cfg!(feature = "vulkan")),
-    ] {
+    for (option, enabled) in features.into_iter().zip([
+        cfg!(feature = "cuda"),
+        cfg!(feature = "hip"),
+        cfg!(feature = "vulkan"),
+    ]) {
         cmake.define(option, if enabled { "ON" } else { "OFF" });
     }
-    let library = cmake.build().join(install_dir).join(filename);
-    let profile = profile_directory(&out_dir);
+    let library = cmake.build().join(install_dir).join(&filename);
     for directory in [
-        profile.clone(),
+        profile.to_owned(),
         profile.join("deps"),
         profile.join("examples"),
     ] {
-        let destination = directory.join(filename);
+        let destination = directory.join(&filename);
         println!("cargo:rerun-if-changed={}", destination.display());
         stage_library(&library, &destination).unwrap_or_else(|error| {
             panic!(
