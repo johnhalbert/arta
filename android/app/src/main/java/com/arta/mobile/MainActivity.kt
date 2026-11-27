@@ -3,6 +3,7 @@ package com.arta.mobile
 import android.app.Activity
 import android.content.Intent
 import android.graphics.Typeface
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.text.Editable
@@ -10,6 +11,7 @@ import android.text.InputType
 import android.text.SpannableStringBuilder
 import android.text.Spanned
 import android.text.TextWatcher
+import android.text.method.LinkMovementMethod
 import android.text.style.StyleSpan
 import android.view.Gravity
 import android.view.View
@@ -19,6 +21,12 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import io.noties.markwon.AbstractMarkwonPlugin
+import io.noties.markwon.LinkResolverDef
+import io.noties.markwon.Markwon
+import io.noties.markwon.MarkwonConfiguration
+import io.noties.markwon.ext.strikethrough.StrikethroughPlugin
+import io.noties.markwon.ext.tables.TablePlugin
 
 class MainActivity : Activity() {
     private val chat get() = (application as ArtaApplication).chat
@@ -30,6 +38,26 @@ class MainActivity : Activity() {
     private lateinit var importModel: Button
     private lateinit var reset: Button
     private var screen = ChatScreen()
+    private var formattedReplies = emptyList<Spanned>()
+    private val markdown by lazy {
+        Markwon.builder(this)
+            .usePlugin(StrikethroughPlugin.create())
+            .usePlugin(TablePlugin.create(this))
+            .usePlugin(object : AbstractMarkwonPlugin() {
+                override fun configureConfiguration(builder: MarkwonConfiguration.Builder) {
+                    val resolver = LinkResolverDef()
+                    builder.linkResolver { view, link ->
+                        val uri = Uri.parse(link)
+                        if ((uri.scheme.equals("https", ignoreCase = true) ||
+                                uri.scheme.equals("http", ignoreCase = true)) && !uri.host.isNullOrBlank()
+                        ) {
+                            resolver.resolve(view, link)
+                        }
+                    }
+                }
+            })
+            .build()
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -75,6 +103,7 @@ class MainActivity : Activity() {
         transcript = TextView(this).apply {
             textSize = 16f
             setTextIsSelectable(true)
+            movementMethod = LinkMovementMethod.getInstance()
             setPadding(0, dp(16), 0, dp(16))
         }
         scroll = ScrollView(this).apply { addView(transcript) }
@@ -143,7 +172,7 @@ class MainActivity : Activity() {
     }
 
     private fun render(state: ChatScreen) {
-        val changed = screen.exchanges != state.exchanges
+        val previousExchanges = screen.exchanges
         screen = state
         status.text = when (state.activity) {
             ActivityState.IMPORTING -> getString(R.string.importing_model)
@@ -153,19 +182,27 @@ class MainActivity : Activity() {
             else -> state.error ?: state.modelName ?: getString(R.string.model_required)
         }
         updateControls()
-        if (changed) {
+        if (previousExchanges != state.exchanges) {
             val follow = !scroll.canScrollVertically(1)
-            transcript.text = SpannableStringBuilder().apply {
-                state.exchanges.forEach { exchange ->
+            formattedReplies = state.exchanges.mapIndexed { index, exchange ->
+                if (previousExchanges.getOrNull(index)?.reply == exchange.reply) {
+                    formattedReplies[index]
+                } else {
+                    markdown.toMarkdown(exchange.reply)
+                }
+            }
+            val text = SpannableStringBuilder().apply {
+                state.exchanges.forEachIndexed { index, exchange ->
                     if (isNotEmpty()) append("\n\n")
                     appendSpeaker(getString(R.string.you))
                     append(exchange.prompt)
                     append("\n\n")
                     appendSpeaker(getString(R.string.app_name))
-                    append(exchange.reply)
+                    append(formattedReplies[index])
                     exchange.note?.let { append("\n").append(it) }
                 }
             }
+            markdown.setParsedMarkdown(transcript, text)
             if (follow) scroll.post { scroll.smoothScrollTo(0, transcript.height) }
         }
     }
