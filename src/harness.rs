@@ -9,11 +9,9 @@ use crate::{
     model::{Model, ModelId},
     provider::{
         Provider,
-        audio::{AudioGenerator, GenerateAudio},
-        audio_cpp::AudioCpp,
-        image::{GenerateImage, ImageGenerator},
+        audio::{self, AudioGenerator, GenerateAudio},
+        image::{self, GenerateImage, ImageGenerator},
         registry::ProviderRegistry,
-        stable_diffusion_cpp::StableDiffusionCpp,
         tool,
     },
     session::Session,
@@ -84,13 +82,13 @@ impl Harness {
         match self.providers.entry(provider_id.to_owned()) {
             Entry::Vacant(entry) => {
                 let provider = create()?;
-                if provider_id == StableDiffusionCpp::ID
+                if provider_id == image::DEFAULT_PROVIDER_ID
                     && let Some(generator) = Arc::clone(&provider).image_generator()
                     && let Some(tool) = GenerateImage::new(generator)
                 {
                     Arc::make_mut(&mut self.tools).register(Arc::new(tool))?;
                 }
-                if provider_id == AudioCpp::ID
+                if provider_id == audio::DEFAULT_PROVIDER_ID
                     && let Some(generator) = Arc::clone(&provider).audio_generator()
                     && let Some(tool) = GenerateAudio::new(generator)
                 {

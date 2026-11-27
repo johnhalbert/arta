@@ -1,0 +1,18 @@
+<resources>
+    <string name="app_name">Arta</string>
+    <string name="import_model">Import GGUF</string>
+    <string name="new_chat">New chat</string>
+    <string name="model_required">Import a GGUF model to start.</string>
+    <string name="loading_model">Loading model…</string>
+    <string name="importing_model">Importing model…</string>
+    <string name="prompt_hint">Message Arta</string>
+    <string name="send">Send</string>
+    <string name="stop">Stop</string>
+    <string name="stopping">Stopping…</string>
+    <string name="generating">Generating…</string>
+    <string name="you">You</string>
+    <string name="stopped">Generation stopped</string>
+    <string name="save_failed">Model loaded. Android couldn’t save it for the next launch.</string>
+    <string name="operation_failed">The operation failed.</string>
+    <item name="draft" type="id" />
+</resources>

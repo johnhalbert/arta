@@ -4,6 +4,8 @@
 
 For a guided tour of the code, follow a request from startup through model loading, tool calls, workflow execution, and terminal output in the [architecture guide](ARCHITECTURE.md#reading-paths).
 
+See [Arta for Android](android/README.md) for the on-device chat prototype and its build instructions.
+
 ## Build and run on Windows
 
 To build `arta`, you need Rust, CMake 3.20 or newer, a C++ compiler, and LLVM's `libclang`. On Windows, use the Visual Studio C++ Build Tools. The default build enables CUDA and requires CUDA Toolkit 12.0 or newer. Use `--no-default-features` for a CPU build.

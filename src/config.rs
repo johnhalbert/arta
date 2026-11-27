@@ -4,12 +4,11 @@
 
 mod agent;
 
+#[cfg(not(target_os = "android"))]
+use crate::provider::cactus::{CactusCompute, CactusConfig};
 use crate::{
     mcp::McpConfig,
-    provider::{
-        cactus::{CactusCompute, CactusConfig},
-        llama_cpp::LlamaCPPOverrides,
-    },
+    provider::llama_cpp::LlamaCPPOverrides,
     skill::SkillConfig,
     workflow::{Workflow, WorkflowConfig},
 };
@@ -187,8 +186,9 @@ impl CliOverrides {
         if let Some(model) = &self.model {
             settings.app.model.clone_from(model);
         }
-        let mut llama = self.llama.clone();
+        #[cfg(not(target_os = "android"))]
         if settings.app.provider == CactusCompute::ID {
+            let mut llama = self.llama.clone();
             let max_tokens = llama.max_tokens.take();
             llama.apply(settings)?;
             if let Some(max_tokens) = max_tokens {
@@ -196,7 +196,7 @@ impl CliOverrides {
             }
             return Ok(());
         }
-        llama.apply(settings)
+        self.llama.clone().apply(settings)
     }
 }
 

@@ -16,9 +16,7 @@ use crate::{
     harness::Harness,
     provider::{
         audio::{self, AudioOptions},
-        audio_cpp::AudioCpp,
         image::{self, ImageOptions},
-        stable_diffusion_cpp::StableDiffusionCpp,
     },
     tool::{Tool, Tools},
 };
@@ -252,7 +250,7 @@ impl<'a> Run<'a> {
             } => {
                 self.image(
                     id,
-                    provider.as_deref().unwrap_or(StableDiffusionCpp::ID),
+                    provider.as_deref().unwrap_or(image::DEFAULT_PROVIDER_ID),
                     model.as_deref(),
                     prompt.as_deref(),
                     options,
@@ -269,7 +267,7 @@ impl<'a> Run<'a> {
             } => {
                 self.audio(
                     id,
-                    provider.as_deref().unwrap_or(AudioCpp::ID),
+                    provider.as_deref().unwrap_or(audio::DEFAULT_PROVIDER_ID),
                     model.as_deref(),
                     prompt.as_deref(),
                     options,

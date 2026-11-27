@@ -6,8 +6,11 @@ use std::{
 };
 
 fn main() {
-    let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo must set OUT_DIR"));
     let target_os = env::var("CARGO_CFG_TARGET_OS").expect("Cargo must set CARGO_CFG_TARGET_OS");
+    if target_os == "android" {
+        return;
+    }
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo must set OUT_DIR"));
     if target_os == "windows" && env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
         // audio.cpp's narrow C API paths are UTF-8.
         let manifest = Path::new("native/windows-utf8.manifest");

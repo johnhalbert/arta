@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{num::NonZeroU32, path::PathBuf, sync::Arc};
 
+pub(crate) const DEFAULT_PROVIDER_ID: &str = "stable-diffusion.cpp";
+
 /// Optional generation settings shared by model defaults, tools, and workflow nodes.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]

@@ -7,6 +7,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
+pub(crate) const DEFAULT_PROVIDER_ID: &str = "audio.cpp";
+
 /// Model-specific request options. Names and values match audio.cpp's `--request-option`.
 pub type AudioOptions = BTreeMap<String, String>;
 

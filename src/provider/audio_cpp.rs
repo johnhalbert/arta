@@ -102,7 +102,7 @@ inventory::submit! {
 }
 
 impl AudioCpp {
-    pub const ID: &str = "audio.cpp";
+    pub const ID: &str = super::audio::DEFAULT_PROVIDER_ID;
 
     fn from_config(config: &Config) -> Result<Arc<dyn Provider>> {
         let settings: AudioCppConfig = config.provider_settings(Self::ID)?;

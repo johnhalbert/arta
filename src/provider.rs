@@ -3,12 +3,16 @@
 //! state on every request.
 
 pub mod audio;
+#[cfg(not(target_os = "android"))]
 pub mod audio_cpp;
+#[cfg(not(target_os = "android"))]
 pub mod cactus;
 pub mod image;
 pub mod llama_cpp;
+#[cfg(not(target_os = "android"))]
 mod native;
 pub mod registry;
+#[cfg(not(target_os = "android"))]
 pub mod stable_diffusion_cpp;
 pub mod tool;
 

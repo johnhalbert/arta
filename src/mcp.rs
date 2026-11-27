@@ -2,9 +2,22 @@
 //! harness. Workflow nodes use the same discovery code in their profile's workspace. Each
 //! tool retains its remote name and a shared running connection.
 
-use crate::tool::{Tool, ToolArguments, ToolOutput, ToolSpec, Tools};
-use anyhow::{Context, Result, ensure};
+use crate::tool::{Tool, Tools};
+use anyhow::{Context, Result};
+use serde::Deserialize;
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+
+#[cfg(not(target_os = "android"))]
+use crate::tool::{ToolArguments, ToolOutput, ToolSpec};
+#[cfg(not(target_os = "android"))]
+use anyhow::ensure;
+#[cfg(not(target_os = "android"))]
 use futures_util::future::BoxFuture;
+#[cfg(not(target_os = "android"))]
 use rmcp::{
     ClientLifecycleMode, ClientServiceExt, RoleClient,
     model::{CallToolRequestParams, ClientConfig, Implementation, ProtocolVersion},
@@ -14,16 +27,11 @@ use rmcp::{
         streamable_http_client::StreamableHttpClientTransportConfig,
     },
 };
-use serde::Deserialize;
+#[cfg(not(target_os = "android"))]
 use serde_json::Value;
-use std::{
-    collections::BTreeMap,
-    env,
-    path::{Path, PathBuf},
-    process::Stdio,
-    sync::Arc,
-    time::Duration,
-};
+#[cfg(not(target_os = "android"))]
+use std::{env, process::Stdio, time::Duration};
+#[cfg(not(target_os = "android"))]
 use tokio::{process::Command, time::timeout};
 
 /// Connections keyed by the names used in profiles and REPL mentions.
@@ -91,10 +99,13 @@ pub enum McpServerConfig {
 }
 
 /// Deadline for one server's startup, MCP handshake, and complete tool listing together.
+#[cfg(not(target_os = "android"))]
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Deadline for one remote function invocation.
+#[cfg(not(target_os = "android"))]
 const CALL_TIMEOUT: Duration = Duration::from_secs(60);
 /// Negotiated rmcp client service shared by tools discovered from one server.
+#[cfg(not(target_os = "android"))]
 type Connection = RunningService<RoleClient, ClientConfig>;
 
 impl McpServerConfig {
@@ -105,6 +116,7 @@ impl McpServerConfig {
 
     /// Validate the server name and bound the entire handshake and tool listing to 30
     /// seconds.
+    #[cfg(not(target_os = "android"))]
     pub(crate) async fn connect_in(
         &self,
         name: &str,
@@ -123,8 +135,19 @@ impl McpServerConfig {
             .context("MCP connection or tool discovery timed out")?
     }
 
+    #[cfg(target_os = "android")]
+    pub(crate) async fn connect_in(
+        &self,
+        _name: &str,
+        _directory: &Path,
+        _workspace: &Path,
+    ) -> Result<Vec<Arc<dyn Tool>>> {
+        anyhow::bail!("MCP transports are unavailable in the Android build")
+    }
+
     /// Start the transport, negotiate the client lifecycle, list tools, and check every
     /// allowlisted name. Preserve the remote dispatch name while prefixing the local name.
+    #[cfg(not(target_os = "android"))]
     async fn discover(
         &self,
         name: &str,
@@ -224,6 +247,7 @@ impl McpServerConfig {
 
 /// One advertised schema and a shared transport. Calls use a 60-second timeout and prefer
 /// structured content over newline-joined text blocks.
+#[cfg(not(target_os = "android"))]
 struct McpTool {
     /// Locally prefixed name with the remote description and input schema.
     spec: ToolSpec,
@@ -233,6 +257,7 @@ struct McpTool {
     connection: Arc<Connection>,
 }
 
+#[cfg(not(target_os = "android"))]
 impl Tool for McpTool {
     fn spec(&self) -> &ToolSpec {
         &self.spec

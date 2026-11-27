@@ -62,7 +62,7 @@ inventory::submit! {
 }
 
 impl StableDiffusionCpp {
-    pub const ID: &str = "stable-diffusion.cpp";
+    pub const ID: &str = super::image::DEFAULT_PROVIDER_ID;
 
     fn from_config(config: &Config) -> Result<Arc<dyn Provider>> {
         let settings: StableDiffusionCppConfig = config.provider_settings(Self::ID)?;
