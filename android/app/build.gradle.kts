@@ -6,6 +6,7 @@ android {
     namespace = "com.arta.mobile"
     compileSdk = 35
     ndkVersion = "28.2.13676358"
+    buildFeatures { aidl = true }
 
     defaultConfig {
         applicationId = "com.arta.mobile"
@@ -18,6 +19,7 @@ android {
 }
 
 dependencies {
+    implementation("com.google.protobuf:protobuf-javalite:4.36.2")
     implementation("io.noties.markwon:core:4.6.2")
     implementation("io.noties.markwon:ext-strikethrough:4.6.2")
     implementation("io.noties.markwon:ext-tables:4.6.2")

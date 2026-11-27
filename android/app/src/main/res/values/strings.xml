@@ -2,6 +2,23 @@
     <string name="app_name">Arta</string>
     <string name="import_model">Import GGUF</string>
     <string name="new_chat">New chat</string>
+    <string name="gpu_offload">Vulkan GPU offload</string>
+    <string name="gpu_cpu">GPU offload off</string>
+    <string name="gpu_all">GPU offload on for all layers</string>
+    <string name="gpu_unavailable">GPU offload unavailable</string>
+    <string name="gpu_detected">Vulkan GPUs detected by llama.cpp\n%1$s</string>
+    <string name="gpu_none_detected">llama.cpp detected no Vulkan GPUs.</string>
+    <string name="gpu_query_unavailable">Vulkan GPU information is unavailable.</string>
+    <string name="gpu_model_required">Import a GGUF to configure GPU layers.</string>
+    <string name="npu_offload_unavailable">This build does not support NPU offload.</string>
+    <string name="gpu_all_layers">All layers</string>
+    <string name="gpu_layer_count">Layers to offload</string>
+    <string name="gpu_layer_help">Enter 0 to use the CPU. Enter a layer count for partial offload, or choose All layers.</string>
+    <string name="gpu_invalid_count">Enter zero or a positive whole number.</string>
+    <plurals name="gpu_layers">
+        <item quantity="one">GPU offload up to %d layer</item>
+        <item quantity="other">GPU offload up to %d layers</item>
+    </plurals>
     <string name="model_required">Import a GGUF model to start.</string>
     <string name="loading_model">Loading model…</string>
     <string name="importing_model">Importing model…</string>
@@ -14,5 +31,23 @@
     <string name="stopped">Generation stopped</string>
     <string name="save_failed">Model loaded. Android couldn’t save it for the next launch.</string>
     <string name="operation_failed">The operation failed.</string>
+    <string name="inference_stopped">Inference stopped unexpectedly.</string>
+    <string name="vulkan_inference_stopped">Vulkan inference stopped unexpectedly.</string>
+    <string name="inference_recovered">The model was reloaded on CPU.</string>
+    <string name="inference_exited">Reopen the model to keep chatting.</string>
+    <string name="inference_exit_unavailable">Android crash details are unavailable.</string>
+    <string name="inference_native_crash">Android reported a native crash.</string>
+    <string name="inference_native_crash_with_signal">Android reported a native crash (%1$s).</string>
+    <string name="inference_signal_exit">Android reported a process exit (%1$s).</string>
+    <string name="inference_signal_number">signal %1$d</string>
+    <string name="inference_abort_message">Native abort message\n%1$s</string>
+    <string name="inference_native_stack">Crashing thread stack\n%1$s</string>
+    <string name="inference_last_crash">Last native crash</string>
+    <string name="inference_copy_crash">Copy report</string>
+    <string name="inference_no_saved_crash">Android has no saved native crash report for Arta’s inference process.</string>
+    <string name="inference_low_memory">Android stopped inference because the device was low on memory.</string>
+    <string name="inference_java_crash">Android reported a Java crash.</string>
+    <string name="inference_exit_code">Inference exited with status %1$d.</string>
+    <string name="inference_exit_other">Android exit reason %1$d, status %2$d.</string>
     <item name="draft" type="id" />
 </resources>

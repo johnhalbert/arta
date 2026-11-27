@@ -157,6 +157,7 @@ dependencies = [
  "arta",
  "futures-util",
  "jni 0.21.1",
+ "llama-cpp-sys-4",
  "tokio",
 ]
 

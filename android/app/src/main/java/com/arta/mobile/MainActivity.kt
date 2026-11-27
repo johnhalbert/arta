@@ -1,6 +1,9 @@
 package com.arta.mobile
 
 import android.app.Activity
+import android.app.AlertDialog
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Intent
 import android.graphics.Typeface
 import android.net.Uri
@@ -37,6 +40,7 @@ class MainActivity : Activity() {
     private lateinit var send: Button
     private lateinit var importModel: Button
     private lateinit var reset: Button
+    private lateinit var gpuOffload: Button
     private var screen = ChatScreen()
     private var formattedReplies = emptyList<Spanned>()
     private val markdown by lazy {
@@ -99,7 +103,14 @@ class MainActivity : Activity() {
             addView(importModel)
             addView(reset)
         }
-        status = TextView(this).apply { accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE }
+        gpuOffload = Button(this).apply {
+            isAllCaps = false
+            setOnClickListener { chooseGpuLayers() }
+        }
+        status = TextView(this).apply {
+            accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
+            setTextIsSelectable(true)
+        }
         transcript = TextView(this).apply {
             textSize = 16f
             setTextIsSelectable(true)
@@ -140,6 +151,7 @@ class MainActivity : Activity() {
             addView(send)
         }
         root.addView(toolbar)
+        root.addView(gpuOffload, LinearLayout.LayoutParams(-2, -2))
         root.addView(status)
         root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
         root.addView(composer)
@@ -169,6 +181,88 @@ class MainActivity : Activity() {
         @Suppress("DEPRECATION")
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == PICK_MODEL && resultCode == RESULT_OK) data?.data?.let(chat::importModel)
+    }
+
+    private fun chooseGpuLayers() {
+        val devices = screen.vulkanDevices
+        val gpuInfo = when {
+            devices == null -> getString(R.string.gpu_query_unavailable)
+            devices.isEmpty() -> getString(R.string.gpu_none_detected)
+            else -> getString(R.string.gpu_detected, devices.joinToString("\n"))
+        }
+        val deviceInfo = "$gpuInfo\n\n${getString(R.string.npu_offload_unavailable)}"
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(12), dp(24), 0)
+            addView(TextView(this@MainActivity).apply { text = deviceInfo })
+            addView(Button(this@MainActivity).apply {
+                isAllCaps = false
+                setText(R.string.inference_last_crash)
+                setOnClickListener { showLastCrashReport() }
+            })
+        }
+        val builder = AlertDialog.Builder(this).setTitle(R.string.gpu_offload).setView(content)
+        if (screen.modelName == null || devices.isNullOrEmpty()) {
+            if (!devices.isNullOrEmpty()) {
+                content.addView(TextView(this).apply { setText(R.string.gpu_model_required) })
+            }
+            builder.setPositiveButton(android.R.string.ok, null).show()
+            return
+        }
+
+        val layers = EditText(this).apply {
+            setSingleLine()
+            inputType = InputType.TYPE_CLASS_NUMBER
+            setHint(R.string.gpu_layer_count)
+            setText(screen.gpuLayers.takeIf { it >= 0 }?.toString())
+            selectAll()
+        }
+        content.addView(TextView(this).apply { setText(R.string.gpu_layer_help) })
+        content.addView(layers)
+        val dialog = builder
+            .setNegativeButton(android.R.string.cancel, null)
+            .setNeutralButton(R.string.gpu_all_layers) { _, _ -> chat.setGpuLayers(ALL_GPU_LAYERS) }
+            .setPositiveButton(android.R.string.ok, null)
+            .show()
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+            val count = layers.text.toString().trim().toIntOrNull()
+            if (count == null || count < 0) {
+                layers.error = getString(R.string.gpu_invalid_count)
+            } else {
+                chat.setGpuLayers(count)
+                dialog.dismiss()
+            }
+        }
+    }
+
+    private fun showLastCrashReport() {
+        chat.readLastCrashReport { report ->
+            if (isFinishing || isDestroyed) return@readLastCrashReport
+            val title = getString(R.string.inference_last_crash)
+            val builder = AlertDialog.Builder(this).setTitle(title)
+                .setPositiveButton(android.R.string.ok, null)
+            if (report == null) {
+                builder.setMessage(R.string.inference_no_saved_crash).show()
+                return@readLastCrashReport
+            }
+            val devices = screen.vulkanDevices.orEmpty()
+            val text = if (devices.isEmpty()) report else {
+                "$report\n\n${getString(R.string.gpu_detected, devices.joinToString("\n"))}"
+            }
+            val details = ScrollView(this).apply {
+                setPadding(dp(24), dp(12), dp(24), dp(12))
+                addView(TextView(this@MainActivity).apply {
+                    this.text = text
+                    setTextIsSelectable(true)
+                })
+            }
+            builder.setView(details)
+                .setNeutralButton(R.string.inference_copy_crash) { _, _ ->
+                    getSystemService(ClipboardManager::class.java)
+                        ?.setPrimaryClip(ClipData.newPlainText(title, text))
+                }
+                .show()
+        }
     }
 
     private fun render(state: ChatScreen) {
@@ -220,6 +314,14 @@ class MainActivity : Activity() {
         val generating = screen.activity == ActivityState.GENERATING
         importModel.isEnabled = idle
         reset.isEnabled = ready && screen.exchanges.isNotEmpty()
+        gpuOffload.isEnabled = idle
+        gpuOffload.text = when {
+            screen.vulkanDevices.isNullOrEmpty() -> getString(R.string.gpu_unavailable)
+            screen.modelName == null -> getString(R.string.gpu_offload)
+            screen.gpuLayers == 0 -> getString(R.string.gpu_cpu)
+            screen.gpuLayers == ALL_GPU_LAYERS -> getString(R.string.gpu_all)
+            else -> resources.getQuantityString(R.plurals.gpu_layers, screen.gpuLayers, screen.gpuLayers)
+        }
         draft.isEnabled = ready
         send.setText(if (generating || screen.activity == ActivityState.STOPPING) R.string.stop else R.string.send)
         send.isEnabled = generating || (ready && draft.text.isNotBlank())

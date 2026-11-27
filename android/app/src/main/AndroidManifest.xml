@@ -4,6 +4,10 @@
         android:allowBackup="false"
         android:label="@string/app_name"
         android:theme="@style/AppTheme">
+        <service
+            android:name=".InferenceService"
+            android:exported="false"
+            android:process=":inference" />
         <activity
             android:name=".MainActivity"
             android:exported="true"

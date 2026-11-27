@@ -15,10 +15,12 @@ use futures_util::StreamExt;
 use jni::{
     JNIEnv,
     objects::{JObject, JString, JValue},
-    sys::jboolean,
+    sys::{jboolean, jint, jobjectArray},
 };
+use llama_cpp_sys_4 as llama;
 use std::{
     cell::RefCell,
+    ffi::CStr,
     panic::{AssertUnwindSafe, catch_unwind},
     path::PathBuf,
     sync::Mutex,
@@ -34,13 +36,38 @@ static CHAT: Mutex<Chat> = Mutex::new(Chat {
     history: Vec::new(),
 });
 
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub extern "system" fn JNI_OnLoad(
+    _vm: *mut jni::sys::JavaVM,
+    _reserved: *mut std::ffi::c_void,
+) -> jint {
+    unsafe { llama::ggml_set_abort_callback(Some(record_abort_message)) };
+    jni::sys::JNI_VERSION_1_6
+}
+
+#[cfg(target_os = "android")]
+unsafe extern "C" fn record_abort_message(message: *const std::ffi::c_char) {
+    unsafe extern "C" {
+        fn android_set_abort_message(message: *const std::ffi::c_char);
+    }
+
+    // ggml calls this with its error message immediately before aborting.
+    unsafe { android_set_abort_message(message) };
+}
+
 struct LoadedModel {
     path: PathBuf,
+    gpu_layers: u32,
     harness: Harness,
 }
 
 impl LoadedModel {
-    fn open(path: PathBuf) -> Result<Self> {
+    fn open(path: PathBuf, gpu_layers: u32) -> Result<Self> {
+        ensure!(
+            gpu_layers == 0 || gpu_offload_available(),
+            "Vulkan GPU offload is unavailable"
+        );
         let mut config = Config::default();
         config.set_provider_settings(
             LlamaCPP::ID,
@@ -49,6 +76,8 @@ impl LoadedModel {
                 models: vec![LlamaCPPModelConfig {
                     id: config.app.model.clone(),
                     path: path.clone(),
+                    gpu_layers,
+                    devices: (gpu_layers == 0).then(Vec::new),
                     ..Default::default()
                 }],
                 ..Default::default()
@@ -60,7 +89,49 @@ impl LoadedModel {
             model: &config.app.model,
         };
         harness.create_session(SESSION, &[(AGENT, model)])?;
-        Ok(Self { path, harness })
+        Ok(Self {
+            path,
+            gpu_layers,
+            harness,
+        })
+    }
+}
+
+fn gpu_offload_available() -> bool {
+    cfg!(feature = "vulkan") && unsafe { llama::llama_supports_gpu_offload() }
+}
+
+fn vulkan_devices() -> Vec<String> {
+    if !cfg!(feature = "vulkan") {
+        return Vec::new();
+    }
+    // The static registry owns these handles and strings. Only read device metadata here.
+    unsafe {
+        let backend = llama::ggml_backend_reg_by_name(c"Vulkan".as_ptr());
+        if backend.is_null() {
+            return Vec::new();
+        }
+        (0..llama::ggml_backend_reg_dev_count(backend))
+            .map(|index| {
+                let device = llama::ggml_backend_reg_dev_get(backend, index);
+                let name = CStr::from_ptr(llama::ggml_backend_dev_name(device)).to_string_lossy();
+                let description =
+                    CStr::from_ptr(llama::ggml_backend_dev_description(device)).to_string_lossy();
+                if description.is_empty() || description == name {
+                    name.into_owned()
+                } else {
+                    format!("{description} ({name})")
+                }
+            })
+            .collect()
+    }
+}
+
+fn gpu_layers_from_java(layers: jint) -> Result<u32> {
+    if layers == -1 {
+        Ok(u32::MAX)
+    } else {
+        u32::try_from(layers).context("invalid GPU layer count")
     }
 }
 
@@ -70,17 +141,22 @@ struct Chat {
 }
 
 impl Chat {
-    fn load(&mut self, path: PathBuf) -> Result<()> {
+    fn replace_model(&mut self, path: PathBuf, gpu_layers: u32) -> Result<()> {
         // llama.cpp owns a process-wide backend. Release the old harness before opening another.
-        let previous = self.model.take().map(|model| model.path);
-        match LoadedModel::open(path) {
+        let previous = self
+            .model
+            .take()
+            .map(|model| (model.path, model.gpu_layers));
+        match LoadedModel::open(path, gpu_layers) {
             Ok(model) => {
                 self.model = Some(model);
-                self.history.clear();
                 Ok(())
             }
             Err(load_error) => {
-                match previous.map(LoadedModel::open).transpose() {
+                match previous
+                    .map(|(path, layers)| LoadedModel::open(path, layers))
+                    .transpose()
+                {
                     Ok(model) => self.model = model,
                     Err(restore_error) => {
                         self.history.clear();
@@ -179,10 +255,49 @@ pub extern "system" fn Java_com_arta_mobile_NativeChat_loadModel<'local>(
     env: JNIEnv<'local>,
     _this: JObject<'local>,
     path: JString<'local>,
+    gpu_layers: jint,
 ) {
     with_chat(env, |env, chat| {
         let path = PathBuf::from(String::from(env.get_string(&path)?));
-        chat.load(path)
+        chat.replace_model(path, gpu_layers_from_java(gpu_layers)?)?;
+        chat.history.clear();
+        Ok(())
+    });
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_arta_mobile_NativeChat_vulkanDevices<'local>(
+    env: JNIEnv<'local>,
+    _this: JObject<'local>,
+) -> jobjectArray {
+    with_chat(env, |env, _| {
+        let devices = vulkan_devices();
+        let array = env.new_object_array(
+            jint::try_from(devices.len())?,
+            "java/lang/String",
+            JObject::null(),
+        )?;
+        for (index, device) in devices.into_iter().enumerate() {
+            let name = env.auto_local(env.new_string(device)?);
+            env.set_object_array_element(&array, index as jint, &name)?;
+        }
+        Ok(array.into_raw())
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_arta_mobile_NativeChat_setGpuLayers<'local>(
+    env: JNIEnv<'local>,
+    _this: JObject<'local>,
+    gpu_layers: jint,
+) {
+    with_chat(env, |_, chat| {
+        let model = chat.model.as_ref().context("import a GGUF model first")?;
+        let layers = gpu_layers_from_java(gpu_layers)?;
+        if layers != model.gpu_layers {
+            chat.replace_model(model.path.clone(), layers)?;
+        }
+        Ok(())
     });
 }
 
@@ -201,6 +316,22 @@ pub extern "system" fn Java_com_arta_mobile_NativeChat_reset<'local>(
 ) {
     with_chat(env, |_, chat| {
         chat.history.clear();
+        Ok(())
+    });
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_arta_mobile_NativeChat_restoreTurn<'local>(
+    env: JNIEnv<'local>,
+    _this: JObject<'local>,
+    prompt: JString<'local>,
+    reply: JString<'local>,
+) {
+    with_chat(env, |env, chat| {
+        ensure!(chat.model.is_some(), "import a GGUF model first");
+        let prompt = env.get_string(&prompt)?.into();
+        let reply = env.get_string(&reply)?.into();
+        chat.history.push(Turn { prompt, reply });
         Ok(())
     });
 }

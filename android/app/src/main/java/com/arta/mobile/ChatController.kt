@@ -11,16 +11,12 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
 class ArtaApplication : Application() {
-    internal lateinit var chat: ChatController
-        private set
-
-    override fun onCreate() {
-        super.onCreate()
-        chat = ChatController(this)
-    }
+    internal val chat by lazy { ChatController(this) }
 }
 
 internal enum class ActivityState { IDLE, LOADING, IMPORTING, GENERATING, STOPPING, RESETTING }
+
+internal const val ALL_GPU_LAYERS = -1
 
 internal data class Exchange(val prompt: String, val reply: String = "", val note: String? = null)
 
@@ -29,12 +25,15 @@ internal data class ChatScreen(
     val modelName: String? = null,
     val exchanges: List<Exchange> = emptyList(),
     val error: String? = null,
+    val vulkanDevices: List<String>? = null,
+    val gpuLayers: Int = 0,
 )
 
-/** Keeps the chat and its single native worker alive across Activity recreation. */
+/** Keeps chat state and its connection to the inference process across Activity recreation. */
 internal class ChatController(private val context: Context) {
     private val main = Handler(Looper.getMainLooper())
     private val worker = Executors.newSingleThreadExecutor()
+    private val inference = InferenceSession(context)
     private val preferences = context.getSharedPreferences("model", Context.MODE_PRIVATE)
     private val directory = File(context.noBackupFilesDir, "models")
     private var modelFile: File? = null
@@ -45,17 +44,21 @@ internal class ChatController(private val context: Context) {
     init {
         val name = preferences.getString("file", null)
         val file = name?.let { File(directory, it) }?.takeIf { it.isFile }
-        if (file != null) {
-            screen = screen.copy(activity = ActivityState.LOADING)
-            worker.execute {
-                val result = runCatching { NativeChat.loadModel(file.absolutePath) }
-                main.post {
+        if (file != null) screen = screen.copy(activity = ActivityState.LOADING)
+        worker.execute {
+            val vulkanDevices = runCatching { inference.vulkanDevices() }.getOrNull()
+            val result = file?.let { runCatching { inference.loadModel(it.absolutePath, 0) } }
+            main.post {
+                if (file != null && result != null) {
                     if (result.isSuccess) modelFile = file
                     update(screen.copy(
                         activity = ActivityState.IDLE,
                         modelName = if (result.isSuccess) preferences.getString("name", file.name) else null,
                         error = result.exceptionOrNull()?.let(::errorMessage),
+                        vulkanDevices = vulkanDevices,
                     ))
+                } else {
+                    update(screen.copy(vulkanDevices = vulkanDevices))
                 }
             }
         }
@@ -66,9 +69,17 @@ internal class ChatController(private val context: Context) {
         listener?.invoke(screen)
     }
 
+    fun readLastCrashReport(onResult: (String?) -> Unit) {
+        worker.execute {
+            val report = lastNativeCrashReport(context)
+            main.post { onResult(report) }
+        }
+    }
+
     fun importModel(uri: Uri) {
         if (screen.activity != ActivityState.IDLE) return
         val previousFile = modelFile
+        val gpuLayers = screen.gpuLayers
         update(screen.copy(activity = ActivityState.IMPORTING, error = null))
         worker.execute {
             val result = runCatching {
@@ -80,7 +91,7 @@ internal class ChatController(private val context: Context) {
                         "Couldn’t read the selected file."
                     }
                     input.use { source -> file.outputStream().use { source.copyTo(it) } }
-                    NativeChat.loadModel(file.absolutePath)
+                    inference.loadModel(file.absolutePath, gpuLayers)
                 } catch (error: Throwable) {
                     file.delete()
                     throw error
@@ -89,8 +100,8 @@ internal class ChatController(private val context: Context) {
                 if (saved) previousFile?.delete()
                 ImportedModel(file, name, saved)
             }
-            val previousStillLoaded = result.isFailure && previousFile != null &&
-                runCatching { NativeChat.hasModel() }.getOrDefault(false)
+            val previousStillLoaded = result.isFailure && inference.hasModel
+            val activeLayers = inference.gpuLayers
             main.post {
                 result.fold(
                     onSuccess = { model ->
@@ -98,14 +109,37 @@ internal class ChatController(private val context: Context) {
                         update(ChatScreen(
                             modelName = model.name,
                             error = if (model.saved) null else context.getString(R.string.save_failed),
+                            vulkanDevices = screen.vulkanDevices,
+                            gpuLayers = activeLayers,
                         ))
                     },
                     onFailure = { error ->
                         if (!previousStillLoaded) modelFile = null
-                        val previous = if (previousStillLoaded) screen else ChatScreen()
-                        update(previous.copy(activity = ActivityState.IDLE, error = errorMessage(error)))
+                        val previous = if (previousStillLoaded) screen else ChatScreen(vulkanDevices = screen.vulkanDevices)
+                        update(previous.copy(activity = ActivityState.IDLE, gpuLayers = activeLayers, error = errorMessage(error)))
                     },
                 )
+            }
+        }
+    }
+
+    fun setGpuLayers(layers: Int) {
+        if (screen.activity != ActivityState.IDLE || modelFile == null || screen.vulkanDevices.isNullOrEmpty() ||
+            layers == screen.gpuLayers
+        ) return
+        update(screen.copy(activity = ActivityState.LOADING, error = null))
+        worker.execute {
+            val result = runCatching { inference.setGpuLayers(layers) }
+            val modelStillLoaded = inference.hasModel
+            val activeLayers = inference.gpuLayers
+            main.post {
+                if (!modelStillLoaded) modelFile = null
+                val next = if (modelStillLoaded) screen else ChatScreen(vulkanDevices = screen.vulkanDevices)
+                update(next.copy(
+                    activity = ActivityState.IDLE,
+                    gpuLayers = activeLayers,
+                    error = result.exceptionOrNull()?.let(::errorMessage),
+                ))
             }
         }
     }
@@ -121,7 +155,7 @@ internal class ChatController(private val context: Context) {
         ))
         worker.execute {
             val result = runCatching {
-                NativeChat.send(prompt, object : ReplySink {
+                inference.send(prompt, object : ReplySink {
                     override fun isCancelled() = cancelled.get()
 
                     override fun onChunk(chunk: String) {
@@ -129,13 +163,21 @@ internal class ChatController(private val context: Context) {
                     }
                 })
             }
+            val modelStillLoaded = inference.hasModel
+            val activeLayers = inference.gpuLayers
             main.post {
                 cancellation = null
                 val note = result.fold(
                     onSuccess = { completed -> if (completed) null else context.getString(R.string.stopped) },
                     onFailure = ::errorMessage,
                 )
-                updateLastExchange(ActivityState.IDLE) { it.copy(note = note) }
+                if (!modelStillLoaded) modelFile = null
+                update(screen.copy(
+                    activity = ActivityState.IDLE,
+                    modelName = screen.modelName.takeIf { modelStillLoaded },
+                    exchanges = screen.exchanges.dropLast(1) + screen.exchanges.last().copy(note = note),
+                    gpuLayers = activeLayers,
+                ))
             }
         }
     }
@@ -150,23 +192,25 @@ internal class ChatController(private val context: Context) {
         if (screen.activity != ActivityState.IDLE || screen.modelName == null) return
         update(screen.copy(activity = ActivityState.RESETTING, error = null))
         worker.execute {
-            val result = runCatching { NativeChat.reset() }
+            val result = runCatching { inference.reset() }
+            val modelStillLoaded = inference.hasModel
+            val activeLayers = inference.gpuLayers
             main.post {
+                if (!modelStillLoaded) modelFile = null
                 update(screen.copy(
                     activity = ActivityState.IDLE,
+                    modelName = screen.modelName.takeIf { modelStillLoaded },
                     exchanges = if (result.isSuccess) emptyList() else screen.exchanges,
                     error = result.exceptionOrNull()?.let(::errorMessage),
+                    gpuLayers = activeLayers,
                 ))
             }
         }
     }
 
-    private fun updateLastExchange(
-        activity: ActivityState = screen.activity,
-        transform: (Exchange) -> Exchange,
-    ) {
+    private fun updateLastExchange(transform: (Exchange) -> Exchange) {
         val exchanges = screen.exchanges
-        update(screen.copy(activity = activity, exchanges = exchanges.dropLast(1) + transform(exchanges.last())))
+        update(screen.copy(exchanges = exchanges.dropLast(1) + transform(exchanges.last())))
     }
 
     private fun update(state: ChatScreen) {
